@@ -1,7 +1,7 @@
 """
 Cloudflare Python Worker - Gemini Telegram Bot
 Webhook-based Telegram Bot running serverlessly on Cloudflare Workers Free Tier.
-Powered by Google Gemini 2.5 Flash.
+Powered by Google Gemini (Default: gemini-2.0-flash).
 """
 
 import json
@@ -14,6 +14,9 @@ from pyodide.ffi import to_js
 # Configure logging
 logger = logging.getLogger("worker")
 logger.setLevel(logging.INFO)
+
+# Default Gemini model supported on current Google AI Studio free tier
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
 # Constants & Prompts
 WELCOME_TEXT = (
@@ -149,8 +152,8 @@ async def get_telegram_file_bytes(bot_token: str, file_id: str):
     return bytes(arr_buf.to_py())
 
 # Gemini REST API: Generate text response
-async def call_gemini_text(gemini_api_key: str, prompt: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}"
+async def call_gemini_text(gemini_api_key: str, prompt: str, model_name: str = DEFAULT_GEMINI_MODEL) -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
     payload = {
         "contents": [
             {
@@ -175,13 +178,20 @@ async def call_gemini_text(gemini_api_key: str, prompt: str) -> str:
             return parts[0]["text"]
             
     if "error" in data:
-        logger.error(f"Gemini API error: {data['error']}")
+        err_msg = data["error"].get("message", "")
+        logger.error(f"Gemini API error ({model_name}): {data['error']}")
+        # If current model returns error, try fallback to gemini-1.5-flash if different
+        if model_name != "gemini-1.5-flash" and ("not found" in err_msg.lower() or "not available" in err_msg.lower() or "resource_exhausted" in err_msg.lower()):
+            logger.info("Retrying with fallback model gemini-1.5-flash...")
+            return await call_gemini_text(gemini_api_key, prompt, model_name="gemini-1.5-flash")
+        if err_msg:
+            return f"⚠️ Gemini API Error: {err_msg}"
         
     return FALLBACK_ERROR_TEXT
 
 # Gemini REST API: Multimodal Image Analysis
-async def call_gemini_vision(gemini_api_key: str, image_bytes: bytes, caption: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}"
+async def call_gemini_vision(gemini_api_key: str, image_bytes: bytes, caption: str, model_name: str = DEFAULT_GEMINI_MODEL) -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_api_key}"
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     
     prompt = caption if caption else "اس تصویر کے بارے میں تفصیل سے بتائیں۔"
@@ -217,12 +227,19 @@ async def call_gemini_vision(gemini_api_key: str, image_bytes: bytes, caption: s
             return parts[0]["text"]
             
     if "error" in data:
-        logger.error(f"Gemini Vision API error: {data['error']}")
+        err_msg = data["error"].get("message", "")
+        logger.error(f"Gemini Vision API error ({model_name}): {data['error']}")
+        # If current model returns error, try fallback to gemini-1.5-flash if different
+        if model_name != "gemini-1.5-flash" and ("not found" in err_msg.lower() or "not available" in err_msg.lower() or "resource_exhausted" in err_msg.lower()):
+            logger.info("Retrying vision with fallback model gemini-1.5-flash...")
+            return await call_gemini_vision(gemini_api_key, image_bytes, caption, model_name="gemini-1.5-flash")
+        if err_msg:
+            return f"⚠️ Gemini API Vision Error: {err_msg}"
         
     return IMAGE_ERROR_TEXT
 
 # Telegram Webhook Handler
-async def handle_telegram_update(update: dict, bot_token: str, gemini_api_key: str):
+async def handle_telegram_update(update: dict, bot_token: str, gemini_api_key: str, model_name: str = DEFAULT_GEMINI_MODEL):
     message = update.get("message")
     if not message:
         return
@@ -256,7 +273,7 @@ async def handle_telegram_update(update: dict, bot_token: str, gemini_api_key: s
             highest_res_photo = photo[-1]
             file_id = highest_res_photo.get("file_id")
             image_bytes = await get_telegram_file_bytes(bot_token, file_id)
-            reply = await call_gemini_vision(gemini_api_key, image_bytes, caption)
+            reply = await call_gemini_vision(gemini_api_key, image_bytes, caption, model_name=model_name)
             await send_telegram_message(bot_token, chat_id, reply, parse_mode="")
         except Exception as e:
             logger.error(f"Error handling photo: {e}")
@@ -267,7 +284,7 @@ async def handle_telegram_update(update: dict, bot_token: str, gemini_api_key: s
     if text:
         await send_chat_action(bot_token, chat_id, "typing")
         try:
-            reply = await call_gemini_text(gemini_api_key, text)
+            reply = await call_gemini_text(gemini_api_key, text, model_name=model_name)
             await send_telegram_message(bot_token, chat_id, reply, parse_mode="")
         except Exception as e:
             logger.error(f"Error handling text: {e}")
@@ -284,11 +301,12 @@ async def on_fetch(request, env):
         
     query_params = parse_qs(parsed_url.query)
     
-    # Extract secrets from env
+    # Extract secrets & settings from env
     bot_token = getattr(env, "TELEGRAM_BOT_TOKEN", None)
     gemini_api_key = getattr(env, "GEMINI_API_KEY", None)
     webhook_secret = getattr(env, "WEBHOOK_SECRET", None)
     setup_secret = getattr(env, "SETUP_SECRET", None)
+    gemini_model = getattr(env, "GEMINI_MODEL", None) or DEFAULT_GEMINI_MODEL
     
     # 1. Health check endpoint: GET /health
     if path == "/health" and method == "GET":
@@ -296,18 +314,21 @@ async def on_fetch(request, env):
             "status": "ok",
             "service": "gemini-telegram-bot",
             "runtime": "cloudflare-python-worker",
+            "model": gemini_model,
             "env_configured": {
                 "TELEGRAM_BOT_TOKEN": bool(bot_token),
                 "GEMINI_API_KEY": bool(gemini_api_key),
                 "WEBHOOK_SECRET": bool(webhook_secret),
                 "SETUP_SECRET": bool(setup_secret),
+                "GEMINI_MODEL": gemini_model,
             }
         })
         
     # 2. Root endpoint: GET /
     if path == "/" and method == "GET":
         return text_response(
-            "🤖 Gemini Telegram Bot is active on Cloudflare Python Workers!\n\n"
+            f"🤖 Gemini Telegram Bot is active on Cloudflare Python Workers!\n"
+            f"Active Model: {gemini_model}\n\n"
             "Endpoints:\n"
             "- GET /health       : Check worker and environment health\n"
             "- GET /set_webhook  : Register the Telegram webhook\n"
@@ -372,7 +393,7 @@ async def on_fetch(request, env):
             if not body_str:
                 return json_response({"ok": True, "note": "Empty body"})
             update = json.loads(body_str)
-            await handle_telegram_update(update, bot_token, gemini_api_key)
+            await handle_telegram_update(update, bot_token, gemini_api_key, model_name=gemini_model)
             return json_response({"ok": True})
         except Exception as e:
             logger.error(f"Error in webhook handler: {e}")
