@@ -1,75 +1,119 @@
-# 🤖 Gemini Telegram Bot
+# 🤖 Gemini Telegram Bot (Cloudflare Python Worker)
 
-A 24/7 intelligent Telegram bot powered by Google's latest **Gemini 2.5 Flash** model.
+A serverless, 24/7 Telegram bot powered by Google's **Gemini 2.5 Flash** model, built to run on the **Cloudflare Workers Free plan** (0 VPS, 0 long-running processes, 100% serverless Webhook architecture).
+
+---
 
 ## ✨ Features (خصوصیات)
-* 💬 **Smart Q&A (ذہین سوال و جواب):** Answers general knowledge, coding, math, essays, writing, and language learning questions.
-* 🖼️ **Multimodal Image Vision (تصویر کا تجزیہ):** Send any image with a prompt or question to analyze, explain, or extract text from it.
-* 🧠 **Conversational Memory (چیٹ ہسٹری یاد رکھنا):** Keeps context across continuous messages in a conversation.
-* 🔄 **Custom Commands:**
-  * `/start` - Start the bot & view introduction.
-  * `/help` - View help & usage instructions.
-  * `/clear` or `/reset` - Clear chat memory and start a fresh session.
-* 🚀 **24/7 Ready:** Ready for 1-click free deployment on Render, Railway, Koyeb, or Docker.
+* 💬 **Smart Q&A (ذہین سوال و جواب):** Answers general knowledge, writing, translation, math, and coding questions using Gemini 2.5 Flash.
+* 🖼️ **Multimodal Image Vision (تصویر کا تجزیہ):** Send any photo with a prompt/caption to analyze, extract text, or explain its contents.
+* ⚡ **100% Serverless Webhook Architecture:** Zero idle memory/CPU consumption, event-driven responses on Telegram updates.
+* 🔒 **Secure Secrets Management:** All API keys and tokens are securely managed via Cloudflare Worker Secrets (never committed to Git).
+* 🛡️ **Webhook Security:** Supports Telegram's `X-Telegram-Bot-Api-Secret-Token` verification.
+* 🩺 **Health & Setup Endpoints:**
+  * `GET /health` - Diagnostic endpoint to verify worker status and secret configurations.
+  * `GET /set_webhook` - Automated 1-click webhook registration with Telegram.
+  * `POST /webhook` - Handles incoming Telegram webhook updates.
 
 ---
 
-## 🛠️ Environment Variables (ضروری متغیرات)
-Create a `.env` file (or set them in your cloud hosting dashboard):
-
-| Variable | Description |
-| :--- | :--- |
-| `TELEGRAM_BOT_TOKEN` | Your Telegram Bot Token from [@BotFather](https://t.me/BotFather) |
-| `GEMINI_API_KEY` | Your Gemini API Key from [Google AI Studio](https://aistudio.google.com/) |
+## 📋 Prerequisites
+1. **Cloudflare Account:** Sign up for free at [dash.cloudflare.com](https://dash.cloudflare.com/).
+2. **Telegram Bot Token:** Create a bot with [@BotFather](https://t.me/BotFather) on Telegram and copy the token.
+3. **Gemini API Key:** Get a free API key from [Google AI Studio](https://aistudio.google.com/).
+4. **Node.js / npm:** (Optional, if deploying via Wrangler CLI) Installed on your machine.
 
 ---
 
-## ☁️ How to Deploy 24/7 for Free (24/7 چلانے کا طریقہ)
+## 🚀 Deployment Instructions (مرحلہ وار ڈپلائمنٹ)
 
-### Option 1: Render (Recommended - Free)
-1. Sign up / Log in to [Render](https://render.com/).
-2. Click **New +** and choose **Background Worker** (or **Web Service**).
-3. Connect your GitHub repository: `sb3791454-del/gemini-telegram-bot`.
-4. Set **Runtime** to `Python 3` (or `Docker`).
-5. Set **Start Command** to: `python bot.py`.
-6. Under **Environment Variables**, add:
-   * `TELEGRAM_BOT_TOKEN` = `your_telegram_bot_token`
-   * `GEMINI_API_KEY` = `your_gemini_api_key`
-7. Click **Deploy**. Your bot will be online 24/7!
+### Method 1: Deploy using Wrangler CLI (Recommended)
 
-### Option 2: Railway
-1. Sign up / Log in to [Railway](https://railway.app/).
-2. Click **New Project** -> **Deploy from GitHub repo**.
-3. Select `gemini-telegram-bot`.
-4. Go to **Variables** and add `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY`.
-5. Railway will automatically build and keep the bot running 24/7.
+#### 1. Clone the repository
+```bash
+git clone https://github.com/sb3791454-del/gemini-telegram-bot.git
+cd gemini-telegram-bot
+```
+
+#### 2. Login to Cloudflare
+```bash
+npx wrangler login
+```
+
+#### 3. Configure Worker Secrets
+Run the following commands to add your tokens securely to Cloudflare:
+```bash
+# Add Telegram Bot Token (from @BotFather)
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+
+# Add Gemini API Key (from Google AI Studio)
+npx wrangler secret put GEMINI_API_KEY
+
+# (Optional) Add a custom Webhook Secret for extra security
+npx wrangler secret put WEBHOOK_SECRET
+
+# (Optional) Add a Setup Secret to protect the /set_webhook endpoint
+npx wrangler secret put SETUP_SECRET
+```
+
+#### 4. Deploy the Worker
+```bash
+npx wrangler deploy
+```
+Once deployed, Wrangler will output your worker URL (e.g., `https://gemini-telegram-bot.<your-subdomain>.workers.dev`).
+
+#### 5. Verify Health
+Visit your health endpoint in a web browser:
+```
+https://gemini-telegram-bot.<your-subdomain>.workers.dev/health
+```
+You should see a JSON response confirming `status: "ok"` and that your secrets are configured.
+
+#### 6. Register Telegram Webhook (1-Click)
+Open the setup endpoint in your browser to automatically register your webhook with Telegram:
+```
+https://gemini-telegram-bot.<your-subdomain>.workers.dev/set_webhook
+```
+*(If you configured `SETUP_SECRET`, add `?secret=your_setup_secret` to the URL).*
+
+Telegram will return `{"ok": true, "result": true, "description": "Webhook was set"}`.
+
+Your bot is now live 24/7 on Cloudflare Workers! 🎉
 
 ---
 
-## 💻 Running Locally (اپنے کمپیوٹر پر چلانا)
+### Method 2: Deploy via Cloudflare Dashboard (No CLI required)
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/sb3791454-del/gemini-telegram-bot.git
-   cd gemini-telegram-bot
-   ```
-2. Create and activate a virtual environment:
-   ```bash
-   python -m venv venv
-   # On Linux / Mac:
-   source venv/bin/activate
-   # On Windows:
-   venv\Scripts\activate
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Copy `.env.example` to `.env` and fill in your keys:
-   ```bash
-   cp .env.example .env
-   ```
-5. Run the bot:
-   ```bash
-   python bot.py
-   ```
+1. Open the [Cloudflare Dashboard](https://dash.cloudflare.com/) and go to **Compute (Workers) > Workers & Pages**.
+2. Click **Create Application** > **Create Worker**.
+3. Name your worker `gemini-telegram-bot` and click **Deploy**.
+4. In the worker settings, go to **Settings > Variables and Secrets**:
+   * Add Secret: `TELEGRAM_BOT_TOKEN`
+   * Add Secret: `GEMINI_API_KEY`
+   * (Optional) Add Secret: `WEBHOOK_SECRET`
+   * (Optional) Add Secret: `SETUP_SECRET`
+5. Go to **Settings > Compatibility Flags** and ensure `python_workers` compatibility is enabled with date `2024-04-03` or later.
+6. Click **Edit Code**, paste the code from `src/entry.py`, and click **Deploy**.
+7. Open `https://gemini-telegram-bot.<your-subdomain>.workers.dev/set_webhook` to activate the Telegram webhook.
+
+---
+
+## 📌 Available Bot Commands
+* `/start` - Welcome message and introduction.
+* `/help` - Usage instructions.
+* `/clear` or `/reset` - Start a fresh conversation.
+
+---
+
+## 📁 Repository Structure
+```text
+.
+├── .env.example        # Reference environment variables
+├── .gitignore          # Git ignore rules for secrets and build artifacts
+├── README.md           # Documentation & deployment guide
+├── requirements.txt    # Python runtime requirements
+├── src/
+│   ├── __init__.py     # Python package marker
+│   └── entry.py        # Cloudflare Python Worker webhook entrypoint
+└── wrangler.toml       # Cloudflare Worker configuration
+```

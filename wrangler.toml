@@ -1,0 +1,11 @@
+name = "gemini-telegram-bot"
+main = "src/entry.py"
+compatibility_date = "2024-04-03"
+compatibility_flags = ["python_workers"]
+
+# Cloudflare Workers Free Tier Configuration
+# Secrets (configure via `wrangler secret put <NAME>` or Cloudflare Dashboard):
+# - TELEGRAM_BOT_TOKEN
+# - GEMINI_API_KEY
+# - WEBHOOK_SECRET (optional, for secure Telegram header verification)
+# - SETUP_SECRET (optional, for securing the /set_webhook endpoint)

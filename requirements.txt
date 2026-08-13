@@ -1,4 +1,3 @@
-python-telegram-bot>=20.0
-google-genai>=0.1.1
-python-dotenv>=1.0.0
-Pillow>=10.0.0
+# Cloudflare Python Workers Runtime (Pyodide)
+# Zero external C-dependencies or socket libraries required.
+# All networking is handled via native asynchronous Cloudflare fetch bindings.
