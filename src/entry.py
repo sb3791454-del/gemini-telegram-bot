@@ -1,7 +1,7 @@
 """
 Cloudflare Python Worker - Gemini Telegram Bot
 Webhook-based Telegram Bot running serverlessly on Cloudflare Workers Free Tier.
-Powered by Google Gemini (Default: gemini-2.0-flash).
+Powered by Google Gemini 3.1 Flash-Lite.
 """
 
 import json
@@ -16,7 +16,7 @@ logger = logging.getLogger("worker")
 logger.setLevel(logging.INFO)
 
 # Default Gemini model supported on current Google AI Studio free tier
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 # Constants & Prompts
 WELCOME_TEXT = (
@@ -180,10 +180,6 @@ async def call_gemini_text(gemini_api_key: str, prompt: str, model_name: str = D
     if "error" in data:
         err_msg = data["error"].get("message", "")
         logger.error(f"Gemini API error ({model_name}): {data['error']}")
-        # If current model returns error, try fallback to gemini-1.5-flash if different
-        if model_name != "gemini-1.5-flash" and ("not found" in err_msg.lower() or "not available" in err_msg.lower() or "resource_exhausted" in err_msg.lower()):
-            logger.info("Retrying with fallback model gemini-1.5-flash...")
-            return await call_gemini_text(gemini_api_key, prompt, model_name="gemini-1.5-flash")
         if err_msg:
             return f"⚠️ Gemini API Error: {err_msg}"
         
@@ -229,10 +225,6 @@ async def call_gemini_vision(gemini_api_key: str, image_bytes: bytes, caption: s
     if "error" in data:
         err_msg = data["error"].get("message", "")
         logger.error(f"Gemini Vision API error ({model_name}): {data['error']}")
-        # If current model returns error, try fallback to gemini-1.5-flash if different
-        if model_name != "gemini-1.5-flash" and ("not found" in err_msg.lower() or "not available" in err_msg.lower() or "resource_exhausted" in err_msg.lower()):
-            logger.info("Retrying vision with fallback model gemini-1.5-flash...")
-            return await call_gemini_vision(gemini_api_key, image_bytes, caption, model_name="gemini-1.5-flash")
         if err_msg:
             return f"⚠️ Gemini API Vision Error: {err_msg}"
         

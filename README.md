@@ -1,16 +1,16 @@
 # 🤖 Gemini Telegram Bot (Cloudflare Python Worker)
 
-A serverless, 24/7 Telegram bot powered by Google's **Gemini 2.0 Flash** model, built to run on the **Cloudflare Workers Free plan** (0 VPS, 0 long-running processes, 100% serverless Webhook architecture).
+A serverless, 24/7 Telegram bot powered by Google's **Gemini 3.1 Flash-Lite** model, built to run on the **Cloudflare Workers Free plan** (0 VPS, 0 long-running processes, 100% serverless Webhook architecture).
 
 ---
 
 ## ✨ Features (خصوصیات)
-* 💬 **Smart Q&A (ذہین سوال و جواب):** Fast and accurate answers for general knowledge, writing, translation, math, and coding questions using **Gemini 2.0 Flash**.
-* 🖼️ **Multimodal Image Vision (تصویر کا تجزیہ):** Send any photo with a prompt/caption to analyze, extract text, or explain its contents.
+* 💬 **Smart Q&A (ذہین سوال و جواب):** Ultra-fast and reliable answers for general knowledge, writing, translation, math, and coding questions using **Gemini 3.1 Flash-Lite**.
+* 🖼️ **Multimodal Image Vision (تصویر کا تجزیہ):** Send any photo with a prompt/caption to analyze, extract text, or explain its contents using multimodal native vision.
 * ⚡ **100% Serverless Webhook Architecture:** Zero idle memory/CPU consumption, event-driven responses on Telegram updates.
 * 🔒 **Secure Secrets Management:** All API keys and tokens are securely managed via Cloudflare Worker Secrets (never committed to Git).
 * 🛡️ **Webhook Security:** Supports Telegram's `X-Telegram-Bot-Api-Secret-Token` verification.
-* 🔄 **Customizable Model:** Defaults to `gemini-2.0-flash` (with automated fallback to `gemini-1.5-flash`), configurable via `GEMINI_MODEL` secret/variable.
+* 🔄 **Customizable Model:** Defaults to `gemini-3.1-flash-lite`, configurable via `GEMINI_MODEL` secret/variable.
 * 🩺 **Health & Setup Endpoints:**
   * `GET /health` - Diagnostic endpoint to verify worker status, active model, and secret configurations.
   * `GET /set_webhook` - Automated 1-click webhook registration with Telegram.
@@ -56,7 +56,7 @@ npx wrangler secret put WEBHOOK_SECRET
 # (Optional) Add a Setup Secret to protect the /set_webhook endpoint
 npx wrangler secret put SETUP_SECRET
 
-# (Optional) Override the default model (defaults to gemini-2.0-flash)
+# (Optional) Override the default model (defaults to gemini-3.1-flash-lite)
 # npx wrangler secret put GEMINI_MODEL
 ```
 
@@ -71,7 +71,7 @@ Visit your health endpoint in a web browser:
 ```
 https://gemini-telegram-bot.<your-subdomain>.workers.dev/health
 ```
-You should see a JSON response confirming `status: "ok"`, the active model `gemini-2.0-flash`, and that your secrets are configured.
+You should see a JSON response confirming `status: "ok"`, the active model `gemini-3.1-flash-lite`, and that your secrets are configured.
 
 #### 6. Register Telegram Webhook (1-Click)
 Open the setup endpoint in your browser to automatically register your webhook with Telegram:
@@ -96,7 +96,7 @@ Your bot is now live 24/7 on Cloudflare Workers! 🎉
    * Add Secret: `GEMINI_API_KEY`
    * (Optional) Add Secret: `WEBHOOK_SECRET`
    * (Optional) Add Secret: `SETUP_SECRET`
-   * (Optional) Add Variable: `GEMINI_MODEL` (value: `gemini-2.0-flash`)
+   * (Optional) Add Variable: `GEMINI_MODEL` (value: `gemini-3.1-flash-lite`)
 5. Go to **Settings > Compatibility Flags** and ensure `python_workers` compatibility is enabled with date `2024-04-03` or later.
 6. Click **Edit Code**, paste the code from `src/entry.py`, and click **Deploy**.
 7. Open `https://gemini-telegram-bot.<your-subdomain>.workers.dev/set_webhook` to activate the Telegram webhook.
