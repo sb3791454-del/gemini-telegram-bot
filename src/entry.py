@@ -71,7 +71,7 @@ async def on_fetch(request, env):
     query_params = parse_qs(parsed_url.query)
     settings = Settings(env)
 
-    # 1. Diagnostic Health Endpoint: GET /health
+    # 1. Diagnostic Health Endpoint: GET /health (Safe: exposes zero secrets or IDs)
     if path == "/health" and method == "GET":
         return json_response({
             "status": "ok",
@@ -85,7 +85,7 @@ async def on_fetch(request, env):
                 "WEBHOOK_SECRET": bool(settings.webhook_secret),
                 "SETUP_SECRET": bool(settings.setup_secret),
                 "ALLOWED_USER_IDS": settings.is_private_mode_enabled,
-                "GEMINI_MODEL": settings.gemini_model,
+                "GEMINI_MODEL": bool(getattr(env, "GEMINI_MODEL", None)),
             }
         })
 
@@ -94,7 +94,7 @@ async def on_fetch(request, env):
         return text_response(
             f"🤖 Sultan Assistant is active on Cloudflare Python Workers!\n"
             f"Active Model: {settings.gemini_model}\n"
-            f"Private Mode: {'Enabled' if settings.is_private_mode_enabled else 'Open Access'}\n\n"
+            f"Access Mode: {'Enforcing Whitelist' if settings.is_private_mode_enabled else 'Locked (No Allowed Users Configured)'}\n\n"
             "Endpoints:\n"
             "- GET /health       : System and configuration status\n"
             "- GET /set_webhook  : Register Telegram webhook\n"

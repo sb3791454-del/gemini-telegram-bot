@@ -9,14 +9,18 @@ def is_user_authorized(user_id: int | None, settings: Settings) -> bool:
     """
     Checks if a Telegram user ID is authorized to use the bot.
     
-    If ALLOWED_USER_IDS is configured (non-empty), user_id must be in the whitelist.
-    If ALLOWED_USER_IDS is not configured (empty), open access is allowed for backward compatibility.
+    Security Policy: FAIL CLOSED.
+    - If ALLOWED_USER_IDS is missing, empty, invalid, or contains no valid IDs,
+      access is DENIED to all users.
+    - If user_id is None, access is DENIED.
+    - Only users explicitly present in settings.allowed_user_ids are granted access.
     """
     if not settings.is_private_mode_enabled:
-        return True
+        logger.warning("Authorization rejected: Bot is locked because no valid ALLOWED_USER_IDS are configured (fail-closed policy).")
+        return False
     
     if user_id is None:
-        logger.warning("Authorization rejected: update does not contain a valid user ID.")
+        logger.warning("Authorization rejected: Update does not contain a valid user ID.")
         return False
         
     authorized = user_id in settings.allowed_user_ids
