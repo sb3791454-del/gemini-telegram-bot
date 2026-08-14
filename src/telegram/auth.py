@@ -1,7 +1,7 @@
 """User authorization and access control."""
 
 import logging
-from src.config.settings import Settings
+from config.settings import Settings
 
 logger = logging.getLogger("worker.auth")
 

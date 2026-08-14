@@ -1,6 +1,6 @@
 """Message chunking, splitting, and formatting utilities for Telegram."""
 
-from src.config.settings import TELEGRAM_SAFE_CHUNK_LIMIT
+from config.settings import TELEGRAM_SAFE_CHUNK_LIMIT
 
 def chunk_message(text: str, max_length: int = TELEGRAM_SAFE_CHUNK_LIMIT) -> list[str]:
     """Splits a long message into chunks respecting newline boundaries when possible."""

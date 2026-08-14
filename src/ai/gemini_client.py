@@ -2,8 +2,8 @@
 
 import json
 import logging
-from src.ai.prompts_builder import build_text_payload, build_vision_payload
-from src.config.prompts import FALLBACK_ERROR_TEXT, IMAGE_ERROR_TEXT, DEFAULT_VISION_PROMPT
+from ai.prompts_builder import build_text_payload, build_vision_payload
+from config.prompts import FALLBACK_ERROR_TEXT, IMAGE_ERROR_TEXT, DEFAULT_VISION_PROMPT
 
 logger = logging.getLogger("worker.ai")
 

@@ -1,7 +1,7 @@
 """Command router for Telegram bot slash commands."""
 
-from src.telegram.client import TelegramClient
-from src.config.prompts import WELCOME_TEXT, HELP_TEXT, RESET_TEXT
+from telegram.client import TelegramClient
+from config.prompts import WELCOME_TEXT, HELP_TEXT, RESET_TEXT
 
 async def handle_command(command: str, chat_id: int, telegram_client: TelegramClient) -> bool:
     """

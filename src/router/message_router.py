@@ -1,12 +1,12 @@
 """Main update and message dispatcher."""
 
 import logging
-from src.config.settings import Settings
-from src.telegram.client import TelegramClient
-from src.telegram.auth import is_user_authorized
-from src.ai.gemini_client import GeminiClient
-from src.router.command_router import handle_command
-from src.config.prompts import UNAUTHORIZED_DENIAL_TEXT, IMAGE_ERROR_TEXT, FALLBACK_ERROR_TEXT
+from config.settings import Settings
+from telegram.client import TelegramClient
+from telegram.auth import is_user_authorized
+from ai.gemini_client import GeminiClient
+from router.command_router import handle_command
+from config.prompts import UNAUTHORIZED_DENIAL_TEXT, IMAGE_ERROR_TEXT, FALLBACK_ERROR_TEXT
 
 logger = logging.getLogger("worker.router")
 

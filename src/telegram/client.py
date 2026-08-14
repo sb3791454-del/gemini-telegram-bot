@@ -2,7 +2,7 @@
 
 import json
 import logging
-from src.telegram.formatting import chunk_message
+from telegram.formatting import chunk_message
 
 logger = logging.getLogger("worker.telegram")
 

@@ -9,10 +9,10 @@ from urllib.parse import urlparse, parse_qs
 from js import Response, Headers, fetch, Object
 from pyodide.ffi import to_js
 
-from src.config.settings import Settings
-from src.telegram.client import TelegramClient
-from src.ai.gemini_client import GeminiClient
-from src.router.message_router import dispatch_telegram_update
+from config.settings import Settings
+from telegram.client import TelegramClient
+from ai.gemini_client import GeminiClient
+from router.message_router import dispatch_telegram_update
 
 # Configure root worker logger
 logger = logging.getLogger("worker")
