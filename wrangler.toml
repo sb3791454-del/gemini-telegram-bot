@@ -9,3 +9,5 @@ compatibility_flags = ["python_workers"]
 # - GEMINI_API_KEY
 # - WEBHOOK_SECRET (optional, for secure Telegram header verification)
 # - SETUP_SECRET (optional, for securing the /set_webhook endpoint)
+# - ALLOWED_USER_IDS (optional, comma-separated numeric Telegram user IDs for private access)
+# - GEMINI_MODEL (optional, defaults to gemini-3.1-flash-lite)

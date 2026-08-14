@@ -1,1 +1,1 @@
-"""Gemini Telegram Bot package."""
+"""Sultan Assistant Core Package."""
