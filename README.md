@@ -17,6 +17,7 @@ Sultan Assistant is built as a **strictly private personal assistant**:
 ## ✨ Features (خصوصیات)
 * 💬 **Smart Q&A (ذہین سوال و جواب):** Fast and accurate answers for general knowledge, writing, translation, math, and coding questions using **Gemini 3.1 Flash-Lite**.
 * 🖼️ **Multimodal Image Vision (تصویر کا تجزیہ):** Send any photo with a prompt/caption to analyze, extract text, or explain its contents using multimodal native vision.
+* 🆔 **Identity Command (`/id`):** Instantly returns your Telegram numeric user ID directly from webhook metadata without querying Gemini.
 * 🔒 **Private User Whitelist:** Enforced user authorization whitelist (`ALLOWED_USER_IDS`) with fail-closed security.
 * ⚡ **100% Serverless Webhook Architecture:** Zero idle memory/CPU consumption, event-driven responses on Telegram updates.
 * 🛡️ **Webhook Security:** Supports Telegram's `X-Telegram-Bot-Api-Secret-Token` verification and protected `/set_webhook` setup.
@@ -47,7 +48,7 @@ src/
 │
 ├── router/                      # Routing & dispatching
 │   ├── __init__.py
-│   ├── command_router.py        # /start, /help, /clear, /reset command execution
+│   ├── command_router.py        # /start, /help, /id, /clear, /reset command execution
 │   └── message_router.py        # Update dispatcher (commands, text, vision, auth gatekeeper)
 │
 └── ai/                          # Gemini AI integration
@@ -62,7 +63,7 @@ src/
 1. **Cloudflare Account:** Sign up for free at [dash.cloudflare.com](https://dash.cloudflare.com/).
 2. **Telegram Bot Token:** Create a bot with [@BotFather](https://t.me/BotFather) on Telegram and copy the token.
 3. **Gemini API Key:** Get a free API key from [Google AI Studio](https://aistudio.google.com/).
-4. **Your Telegram User ID:** Get your numeric Telegram ID (e.g. from [@userinfobot](https://t.me/userinfobot)).
+4. **Your Telegram User ID:** Get your numeric Telegram ID (e.g. from [@userinfobot](https://t.me/userinfobot) or by sending `/id` once authorized).
 5. **Node.js / npm:** (Optional, if deploying via Wrangler CLI) Installed on your machine.
 
 ---
@@ -149,6 +150,7 @@ Your bot is now live 24/7 on Cloudflare Workers! 🎉
 ---
 
 ## 📌 Available Bot Commands
+* `/id` - View your Telegram numeric user ID.
 * `/start` - Welcome message and introduction.
 * `/help` - Usage instructions.
 * `/clear` or `/reset` - Start a fresh conversation.

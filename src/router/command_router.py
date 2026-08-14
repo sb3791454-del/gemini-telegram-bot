@@ -3,7 +3,7 @@
 from telegram.client import TelegramClient
 from config.prompts import WELCOME_TEXT, HELP_TEXT, RESET_TEXT
 
-async def handle_command(command: str, chat_id: int, telegram_client: TelegramClient) -> bool:
+async def handle_command(command: str, chat_id: int, telegram_client: TelegramClient, user_id: int | None = None) -> bool:
     """
     Evaluates slash commands. Returns True if command was handled, False otherwise.
     """
@@ -19,6 +19,11 @@ async def handle_command(command: str, chat_id: int, telegram_client: TelegramCl
         
     if clean_cmd.startswith("/clear") or clean_cmd.startswith("/reset"):
         await telegram_client.send_message(chat_id, RESET_TEXT, parse_mode="Markdown")
+        return True
+
+    if clean_cmd.startswith("/id"):
+        id_text = f"🆔 Your Telegram User ID: {user_id}" if user_id is not None else "⚠️ Could not determine Telegram User ID."
+        await telegram_client.send_message(chat_id, id_text, parse_mode="")
         return True
         
     return False

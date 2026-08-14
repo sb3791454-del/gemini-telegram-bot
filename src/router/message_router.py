@@ -28,7 +28,7 @@ async def dispatch_telegram_update(
     from_user = message.get("from", {})
     user_id = from_user.get("id")
 
-    # 1. Authorization Gatekeeper
+    # 1. Authorization Gatekeeper (Fail-Closed)
     if not is_user_authorized(user_id, settings):
         await telegram_client.send_message(chat_id, UNAUTHORIZED_DENIAL_TEXT, parse_mode="Markdown")
         return
@@ -37,9 +37,9 @@ async def dispatch_telegram_update(
     photo = message.get("photo")
     caption = message.get("caption", "").strip()
 
-    # 2. Check for Commands
+    # 2. Check for Commands (Evaluated before any Gemini calls)
     if text.startswith("/"):
-        handled = await handle_command(text, chat_id, telegram_client)
+        handled = await handle_command(text, chat_id, telegram_client, user_id=user_id)
         if handled:
             return
 
