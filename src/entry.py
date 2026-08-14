@@ -13,6 +13,8 @@ from config.settings import Settings
 from telegram.client import TelegramClient
 from ai.gemini_client import GeminiClient
 from router.message_router import dispatch_telegram_update
+from storage.database import D1Database
+from storage.repositories import UserRepository, MemoryRepository
 
 # Configure root worker logger
 logger = logging.getLogger("worker")
@@ -71,7 +73,13 @@ async def on_fetch(request, env):
     query_params = parse_qs(parsed_url.query)
     settings = Settings(env)
 
-    # 1. Diagnostic Health Endpoint: GET /health (Safe: exposes zero secrets or IDs)
+    # Initialize D1 Storage & Repositories if binding is present
+    d1_binding = getattr(env, "ASSISTANT_DB", None)
+    db = D1Database(d1_binding)
+    user_repo = UserRepository(db)
+    memory_repo = MemoryRepository(db)
+
+    # 1. Diagnostic Health Endpoint: GET /health (Safe: exposes zero secrets, tokens, or IDs)
     if path == "/health" and method == "GET":
         return json_response({
             "status": "ok",
@@ -79,12 +87,14 @@ async def on_fetch(request, env):
             "runtime": "cloudflare-python-worker",
             "active_model": settings.gemini_model,
             "private_mode": settings.is_private_mode_enabled,
+            "database_connected": db.is_available,
             "env_configured": {
                 "TELEGRAM_BOT_TOKEN": bool(settings.telegram_bot_token),
                 "GEMINI_API_KEY": bool(settings.gemini_api_key),
                 "WEBHOOK_SECRET": bool(settings.webhook_secret),
                 "SETUP_SECRET": bool(settings.setup_secret),
                 "ALLOWED_USER_IDS": settings.is_private_mode_enabled,
+                "ASSISTANT_DB": db.is_available,
                 "GEMINI_MODEL": bool(getattr(env, "GEMINI_MODEL", None)),
             }
         })
@@ -94,7 +104,8 @@ async def on_fetch(request, env):
         return text_response(
             f"🤖 Sultan Assistant is active on Cloudflare Python Workers!\n"
             f"Active Model: {settings.gemini_model}\n"
-            f"Access Mode: {'Enforcing Whitelist' if settings.is_private_mode_enabled else 'Locked (No Allowed Users Configured)'}\n\n"
+            f"Access Mode: {'Enforcing Whitelist' if settings.is_private_mode_enabled else 'Locked (No Allowed Users Configured)'}\n"
+            f"Database: {'Connected (D1)' if db.is_available else 'Offline / Ephemeral'}\n\n"
             "Endpoints:\n"
             "- GET /health       : System and configuration status\n"
             "- GET /set_webhook  : Register Telegram webhook\n"
@@ -151,7 +162,14 @@ async def on_fetch(request, env):
             telegram_client = TelegramClient(settings.telegram_bot_token, async_http_request)
             gemini_client = GeminiClient(settings.gemini_api_key, settings.gemini_model, async_http_request)
             
-            await dispatch_telegram_update(update, settings, telegram_client, gemini_client)
+            await dispatch_telegram_update(
+                update,
+                settings,
+                telegram_client,
+                gemini_client,
+                user_repo=user_repo,
+                memory_repo=memory_repo
+            )
             return json_response({"ok": True})
         except Exception as e:
             logger.error(f"Error processing webhook update: {e}")

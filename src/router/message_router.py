@@ -1,12 +1,14 @@
 """Main update and message dispatcher."""
 
 import logging
+from typing import Optional
 from config.settings import Settings
 from telegram.client import TelegramClient
 from telegram.auth import is_user_authorized
 from ai.gemini_client import GeminiClient
 from router.command_router import handle_command
 from config.prompts import UNAUTHORIZED_DENIAL_TEXT, IMAGE_ERROR_TEXT, FALLBACK_ERROR_TEXT
+from storage.repositories import UserRepository, MemoryRepository
 
 logger = logging.getLogger("worker.router")
 
@@ -14,7 +16,9 @@ async def dispatch_telegram_update(
     update: dict,
     settings: Settings,
     telegram_client: TelegramClient,
-    gemini_client: GeminiClient
+    gemini_client: GeminiClient,
+    user_repo: Optional[UserRepository] = None,
+    memory_repo: Optional[MemoryRepository] = None
 ):
     """Processes an incoming Telegram update dictionary."""
     message = update.get("message")
@@ -28,22 +32,38 @@ async def dispatch_telegram_update(
     from_user = message.get("from", {})
     user_id = from_user.get("id")
 
-    # 1. Authorization Gatekeeper (Fail-Closed)
+    # 1. Authorization Gatekeeper (Fail-Closed: evaluated before DB writes and AI calls)
     if not is_user_authorized(user_id, settings):
         await telegram_client.send_message(chat_id, UNAUTHORIZED_DENIAL_TEXT, parse_mode="Markdown")
         return
+
+    # 2. Update Authorized User Profile in D1 (Graceful/Non-blocking)
+    if user_repo and user_id:
+        try:
+            display_name = from_user.get("first_name", "")
+            username = from_user.get("username", "")
+            await user_repo.upsert_user_profile(user_id, display_name=display_name, username=username)
+        except Exception as e:
+            logger.error(f"Error persisting user profile: {e}")
 
     text = message.get("text", "").strip()
     photo = message.get("photo")
     caption = message.get("caption", "").strip()
 
-    # 2. Check for Commands (Evaluated before any Gemini calls)
+    # 3. Check for Commands (Evaluated before any Gemini calls)
     if text.startswith("/"):
-        handled = await handle_command(text, chat_id, telegram_client, user_id=user_id)
+        handled = await handle_command(
+            text,
+            chat_id,
+            telegram_client,
+            user_id=user_id,
+            user_repo=user_repo,
+            memory_repo=memory_repo
+        )
         if handled:
             return
 
-    # 3. Handle Photos / Multimodal Vision
+    # 4. Handle Photos / Multimodal Vision
     if photo:
         await telegram_client.send_chat_action(chat_id, "typing")
         try:
@@ -57,7 +77,7 @@ async def dispatch_telegram_update(
             await telegram_client.send_message(chat_id, IMAGE_ERROR_TEXT, parse_mode="")
         return
 
-    # 4. Handle Ordinary Text Messages
+    # 5. Handle Ordinary Text Messages
     if text:
         await telegram_client.send_chat_action(chat_id, "typing")
         try:

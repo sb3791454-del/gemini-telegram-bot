@@ -1,6 +1,6 @@
 # 🤖 Sultan Assistant (Cloudflare Python Worker)
 
-A modular, serverless, 24/7 private personal assistant and trading analysis platform powered by Google's **Gemini 3.1 Flash-Lite** model, engineered to run on the **Cloudflare Workers Free plan** (0 VPS, 0 long-running processes, 100% serverless Webhook architecture).
+A modular, serverless, 24/7 private personal assistant and trading analysis platform powered by Google's **Gemini 3.1 Flash-Lite** model and **Cloudflare D1** persistent storage, engineered to run on the **Cloudflare Workers Free plan** (0 VPS, 0 long-running processes, 100% serverless Webhook architecture).
 
 ---
 
@@ -9,21 +9,23 @@ A modular, serverless, 24/7 private personal assistant and trading analysis plat
 Sultan Assistant is built as a **strictly private personal assistant**:
 
 * **Fail-Closed Access Control:** The bot requires `ALLOWED_USER_IDS` to contain at least one valid Telegram user ID. If `ALLOWED_USER_IDS` is missing, empty, or invalid, the bot **denies access to all users** by default.
-* **Quota Protection:** Unauthorized requests are rejected immediately at the router level and **never** trigger Google Gemini API calls or consume token quotas.
-* **Secret Protection:** Webhook calls are validated via `X-Telegram-Bot-Api-Secret-Token`. Health endpoints (`/health`) expose only safe boolean readiness flags and never output secret values or user IDs.
+* **Database & Quota Protection:** Unauthorized requests are rejected immediately at the router level and **never** trigger Google Gemini API calls, database writes, or profile creation.
+* **Secret Protection:** Webhook calls are validated via `X-Telegram-Bot-Api-Secret-Token`. Health endpoints (`/health`) expose only safe boolean readiness flags and never output secret values, database contents, or user IDs.
 
 ---
 
 ## ✨ Features (خصوصیات)
 * 💬 **Smart Q&A (ذہین سوال و جواب):** Fast and accurate answers for general knowledge, writing, translation, math, and coding questions using **Gemini 3.1 Flash-Lite**.
 * 🖼️ **Multimodal Image Vision (تصویر کا تجزیہ):** Send any photo with a prompt/caption to analyze, extract text, or explain its contents using multimodal native vision.
+* 💾 **Persistent State & Memory (Cloudflare D1):** User profiles, activity timestamps, preferences, and extensible memory storage.
 * 🆔 **Identity Command (`/id`):** Instantly returns your Telegram numeric user ID directly from webhook metadata without querying Gemini.
+* 🧠 **Memory Status Command (`/memory`):** Diagnostic command summarizing assistant memory and profile readiness.
 * 🔒 **Private User Whitelist:** Enforced user authorization whitelist (`ALLOWED_USER_IDS`) with fail-closed security.
 * ⚡ **100% Serverless Webhook Architecture:** Zero idle memory/CPU consumption, event-driven responses on Telegram updates.
 * 🛡️ **Webhook Security:** Supports Telegram's `X-Telegram-Bot-Api-Secret-Token` verification and protected `/set_webhook` setup.
-* 🔄 **Modular Architecture:** Clean decoupled modules (`config/`, `telegram/`, `router/`, `ai/`) prepared for future trading analysis modules.
+* 🔄 **Modular Architecture:** Clean decoupled modules (`config/`, `telegram/`, `router/`, `ai/`, `storage/`) prepared for future trading analysis modules.
 * 🩺 **Health & Setup Endpoints:**
-  * `GET /health` - Diagnostic endpoint to verify worker status, active model, private mode status, and secret configurations without exposing secrets.
+  * `GET /health` - Diagnostic endpoint to verify worker status, active model, private mode, database connectivity, and secret configurations without exposing secrets.
   * `GET /set_webhook` - Automated 1-click webhook registration with Telegram.
   * `POST /webhook` - Handles incoming Telegram webhook updates.
 
@@ -40,6 +42,11 @@ src/
 │   ├── settings.py              # Environment configuration & ALLOWED_USER_IDS parser
 │   └── prompts.py               # Predefined copy, welcome text, and error templates
 │
+├── storage/                     # Cloudflare D1 persistence layer
+│   ├── __init__.py
+│   ├── database.py              # D1 database async query client (Pyodide compatible)
+│   └── repositories.py          # Repositories for User Profiles, Memories, and Settings
+│
 ├── telegram/                    # Telegram API client & utilities
 │   ├── __init__.py
 │   ├── client.py                # Async Telegram REST API (sendMessage, sendChatAction, getFile)
@@ -48,14 +55,37 @@ src/
 │
 ├── router/                      # Routing & dispatching
 │   ├── __init__.py
-│   ├── command_router.py        # /start, /help, /id, /clear, /reset command execution
-│   └── message_router.py        # Update dispatcher (commands, text, vision, auth gatekeeper)
+│   ├── command_router.py        # /start, /help, /id, /memory, /clear, /reset execution
+│   └── message_router.py        # Update dispatcher (commands, text, vision, auth, profile upsert)
 │
 └── ai/                          # Gemini AI integration
     ├── __init__.py
     ├── gemini_client.py         # Google Gemini 3.1 Flash-Lite REST client
     └── prompts_builder.py       # JSON payload formatting for text & multimodal requests
 ```
+
+---
+
+## 🗄️ Database Setup (Cloudflare D1)
+
+To bind Cloudflare D1 to Sultan Assistant:
+
+1. **Create the D1 Database:**
+   ```bash
+   npx wrangler d1 create sultan-assistant-db
+   ```
+2. **Execute Database Migration Schema:**
+   ```bash
+   npx wrangler d1 execute sultan-assistant-db --file=./schema.sql
+   ```
+3. **Add D1 Binding to `wrangler.toml` (or Cloudflare Dashboard):**
+   ```toml
+   [[d1_databases]]
+   binding = "ASSISTANT_DB"
+   database_name = "sultan-assistant-db"
+   database_id = "<your-d1-database-id>"
+   ```
+*(Note: If D1 is not bound, Sultan Assistant operates in graceful ephemeral mode without crashing).*
 
 ---
 
@@ -116,7 +146,7 @@ Visit your health endpoint in a web browser:
 ```
 https://gemini-telegram-bot.<your-subdomain>.workers.dev/health
 ```
-You should see a JSON response confirming `status: "ok"`, `private_mode: true`, and that your secrets are configured.
+You should see a JSON response confirming `status: "ok"`, `private_mode: true`, `database_connected: true`, and that your secrets are configured.
 
 #### 6. Register Telegram Webhook (1-Click)
 Open the setup endpoint in your browser to automatically register your webhook with Telegram:
@@ -143,14 +173,18 @@ Your bot is now live 24/7 on Cloudflare Workers! 🎉
    * (Optional) Add Secret: `WEBHOOK_SECRET`
    * (Optional) Add Secret: `SETUP_SECRET`
    * (Optional) Add Variable: `GEMINI_MODEL` (value: `gemini-3.1-flash-lite`)
-5. Go to **Settings > Compatibility Flags** and ensure `python_workers` compatibility is enabled with date `2024-04-03` or later.
-6. Upload or paste the modular source files under `src/` and click **Deploy**.
-7. Open `https://gemini-telegram-bot.<your-subdomain>.workers.dev/set_webhook` to activate the Telegram webhook.
+5. In the worker settings, go to **Settings > Bindings > D1 Database Bindings**:
+   * Variable Name: `ASSISTANT_DB`
+   * Database: `sultan-assistant-db`
+6. Go to **Settings > Compatibility Flags** and ensure `python_workers` compatibility is enabled with date `2024-04-03` or later.
+7. Upload or paste the modular source files under `src/` and click **Deploy**.
+8. Open `https://gemini-telegram-bot.<your-subdomain>.workers.dev/set_webhook` to activate the Telegram webhook.
 
 ---
 
 ## 📌 Available Bot Commands
 * `/id` - View your Telegram numeric user ID.
+* `/memory` - Check assistant memory and database state.
 * `/start` - Welcome message and introduction.
 * `/help` - Usage instructions.
 * `/clear` or `/reset` - Start a fresh conversation.
@@ -164,10 +198,12 @@ Your bot is now live 24/7 on Cloudflare Workers! 🎉
 ├── .gitignore          # Git ignore rules for secrets and build artifacts
 ├── README.md           # Documentation & deployment guide
 ├── requirements.txt    # Python runtime requirements
+├── schema.sql          # Cloudflare D1 SQL schema migrations
 ├── src/
 │   ├── __init__.py     # Core package marker
 │   ├── entry.py        # Cloudflare Python Worker lifecycle & HTTP router
 │   ├── config/         # Settings, prompts, and constants
+│   ├── storage/        # Cloudflare D1 client and data repositories
 │   ├── telegram/       # Async Telegram API client, formatting, and authorization
 │   ├── router/         # Command and message dispatcher
 │   └── ai/             # Gemini 3.1 Flash-Lite REST integration and payload builders
