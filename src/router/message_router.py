@@ -6,6 +6,7 @@ from config.settings import Settings
 from telegram.client import TelegramClient
 from telegram.auth import is_user_authorized
 from ai.gemini_client import GeminiClient
+from ai.prompts_builder import select_relevant_memories, format_prompt_with_memories
 from router.command_router import handle_command
 from config.prompts import UNAUTHORIZED_DENIAL_TEXT, IMAGE_ERROR_TEXT, FALLBACK_ERROR_TEXT
 from storage.repositories import UserRepository, MemoryRepository
@@ -77,11 +78,23 @@ async def dispatch_telegram_update(
             await telegram_client.send_message(chat_id, IMAGE_ERROR_TEXT, parse_mode="")
         return
 
-    # 5. Handle Ordinary Text Messages
+    # 5. Handle Ordinary Text Messages with Context-Aware Long-Term Memory Injection
     if text:
         await telegram_client.send_chat_action(chat_id, "typing")
         try:
-            reply = await gemini_client.generate_text(text, model_name=settings.gemini_model)
+            # Step 5a: Retrieve user's stored memories from D1 (non-blocking / resilient)
+            relevant_memories = []
+            if memory_repo and user_id and memory_repo.db.is_available:
+                try:
+                    all_user_memories = await memory_repo.get_all_memories(user_id)
+                    relevant_memories = select_relevant_memories(text, all_user_memories, max_memories=5)
+                except Exception as e:
+                    logger.error(f"Error selecting relevant memories: {e}")
+
+            # Step 5b: Construct prompt with relevant long-term memory context (if any match)
+            final_prompt = format_prompt_with_memories(text, relevant_memories)
+
+            reply = await gemini_client.generate_text(final_prompt, model_name=settings.gemini_model)
             await telegram_client.send_message(chat_id, reply, parse_mode="")
         except Exception as e:
             logger.error(f"Error processing text message: {e}")
