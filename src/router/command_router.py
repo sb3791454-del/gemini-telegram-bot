@@ -3,7 +3,7 @@
 from typing import Optional
 from telegram.client import TelegramClient
 from config.prompts import WELCOME_TEXT, HELP_TEXT, RESET_TEXT
-from storage.repositories import UserRepository, MemoryRepository, infer_memory_type
+from storage.repositories import UserRepository, MemoryRepository, ConversationRepository, infer_memory_type
 
 async def handle_command(
     command: str,
@@ -11,7 +11,8 @@ async def handle_command(
     telegram_client: TelegramClient,
     user_id: Optional[int] = None,
     user_repo: Optional[UserRepository] = None,
-    memory_repo: Optional[MemoryRepository] = None
+    memory_repo: Optional[MemoryRepository] = None,
+    conversation_repo: Optional[ConversationRepository] = None
 ) -> bool:
     """
     Evaluates slash commands. Returns True if command was handled, False otherwise.
@@ -26,7 +27,13 @@ async def handle_command(
         await telegram_client.send_message(chat_id, HELP_TEXT, parse_mode="Markdown")
         return True
         
+    # /clear and /reset: Start a brand-new session (preserves long-term memories)
     if clean_cmd.startswith("/clear") or clean_cmd.startswith("/reset"):
+        if conversation_repo and user_id:
+            try:
+                await conversation_repo.create_new_session(user_id)
+            except Exception:
+                pass
         await telegram_client.send_message(chat_id, RESET_TEXT, parse_mode="Markdown")
         return True
 
@@ -35,7 +42,38 @@ async def handle_command(
         await telegram_client.send_message(chat_id, id_text, parse_mode="")
         return True
 
-    # --- MEMORY COMMANDS ---
+    # --- SESSION CONVERSATION HISTORY COMMAND ---
+    if clean_cmd.startswith("/history"):
+        if not conversation_repo or not conversation_repo.db.is_available or not user_id:
+            await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔ (Database offline)", parse_mode="")
+            return True
+
+        try:
+            active_session = await conversation_repo.get_or_create_active_session(user_id)
+            if not active_session:
+                await telegram_client.send_message(chat_id, "🗨️ *موجودہ سیشن میں کوئی پچھلی گفتگو موجود نہیں ہے۔*", parse_mode="Markdown")
+                return True
+
+            messages = await conversation_repo.get_recent_messages(user_id, active_session["id"], limit=10)
+            if not messages:
+                await telegram_client.send_message(chat_id, "🗨️ *موجودہ سیشن میں کوئی پچھلی گفتگو موجود نہیں ہے۔*", parse_mode="Markdown")
+                return True
+
+            lines = ["🗨️ *موجودہ سیشن کی گفتگو (Recent Session History):*\n"]
+            for idx, msg in enumerate(messages, start=1):
+                sender = "You" if msg.get("role") == "user" else "Sultan Assistant"
+                content = msg.get("content", "").strip()
+                # Truncate preview if very long
+                if len(content) > 150:
+                    content = content[:147] + "..."
+                lines.append(f"{idx}. *{sender}:* {content}")
+
+            await telegram_client.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+        except Exception:
+            await telegram_client.send_message(chat_id, "⚠️ گفتگو لانے میں مسئلہ پیش آیا۔", parse_mode="")
+        return True
+
+    # --- LONG-TERM MEMORY COMMANDS ---
 
     # 1. /remember <text>
     if clean_cmd.startswith("/remember"):
@@ -174,7 +212,7 @@ async def handle_command(
                 )
                 if profile and profile.get("last_seen_at"):
                     resp_text += f"• Last Active: {profile['last_seen_at'][:19].replace('T', ' ')} UTC\n"
-            except Exception as e:
+            except Exception:
                 resp_text = "🧠 *Memory Status:* Active (D1 Error occurred)"
         else:
             resp_text = (

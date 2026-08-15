@@ -6,6 +6,7 @@ from typing import Set, Optional
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 TELEGRAM_SAFE_CHUNK_LIMIT = 4000
 MAX_HTTP_TIMEOUT_SECONDS = 25
+CONVERSATION_HISTORY_LIMIT = 20
 
 class Settings:
     """Encapsulates runtime environment configuration."""
@@ -15,6 +16,7 @@ class Settings:
         self.gemini_model: str = getattr(env, "GEMINI_MODEL", None) or DEFAULT_GEMINI_MODEL
         self.webhook_secret: Optional[str] = getattr(env, "WEBHOOK_SECRET", None)
         self.setup_secret: Optional[str] = getattr(env, "SETUP_SECRET", None)
+        self.conversation_history_limit: int = CONVERSATION_HISTORY_LIMIT
         
         # Parse ALLOWED_USER_IDS (comma-separated list of numeric Telegram IDs)
         raw_allowed = getattr(env, "ALLOWED_USER_IDS", None)

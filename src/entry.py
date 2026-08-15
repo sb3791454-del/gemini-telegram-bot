@@ -14,7 +14,12 @@ from telegram.client import TelegramClient
 from ai.gemini_client import GeminiClient
 from router.message_router import dispatch_telegram_update
 from storage.database import D1Database
-from storage.repositories import UserRepository, MemoryRepository
+from storage.repositories import (
+    UserRepository,
+    MemoryRepository,
+    SettingsRepository,
+    ConversationRepository,
+)
 
 # Configure root worker logger
 logger = logging.getLogger("worker")
@@ -76,8 +81,10 @@ async def on_fetch(request, env):
     # Initialize D1 Storage & Repositories if binding is present
     d1_binding = getattr(env, "ASSISTANT_DB", None)
     db = D1Database(d1_binding)
+    settings_repo = SettingsRepository(db)
     user_repo = UserRepository(db)
     memory_repo = MemoryRepository(db)
+    conversation_repo = ConversationRepository(db, settings_repo=settings_repo)
 
     # 1. Diagnostic Health Endpoint: GET /health (Safe: exposes zero secrets, tokens, or IDs)
     if path == "/health" and method == "GET":
@@ -168,7 +175,8 @@ async def on_fetch(request, env):
                 telegram_client,
                 gemini_client,
                 user_repo=user_repo,
-                memory_repo=memory_repo
+                memory_repo=memory_repo,
+                conversation_repo=conversation_repo
             )
             return json_response({"ok": True})
         except Exception as e:

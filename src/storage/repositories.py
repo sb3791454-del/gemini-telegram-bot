@@ -1,9 +1,10 @@
-"""Repository abstractions for User Profile, Memory, and Assistant Settings."""
+"""Repository abstractions for User Profile, Memory, Settings, and Conversation History."""
 
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
+from config.settings import CONVERSATION_HISTORY_LIMIT
 from storage.database import D1Database
 
 logger = logging.getLogger("worker.storage.repositories")
@@ -183,3 +184,137 @@ class SettingsRepository:
         ON CONFLICT(telegram_user_id) DO UPDATE SET settings_json = ?, updated_at = ?
         """
         return await self.db.execute(sql, telegram_user_id, settings_str, now, settings_str, now)
+
+class ConversationRepository:
+    """Manages active conversation sessions and recent message history in D1."""
+    def __init__(self, db: D1Database, settings_repo: Optional[SettingsRepository] = None):
+        self.db = db
+        self.settings_repo = settings_repo or SettingsRepository(db)
+
+    async def get_or_create_active_session(self, telegram_user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the user's active session, or creates a new one if none exists.
+        Verifies session ownership strictly.
+        """
+        if not self.db.is_available:
+            return None
+
+        # 1. Check assistant_settings for active_session_id
+        settings = await self.settings_repo.get_settings(telegram_user_id)
+        active_session_id = settings.get("active_session_id")
+        
+        if active_session_id is not None:
+            sql = "SELECT id, telegram_user_id, created_at, updated_at FROM conversation_sessions WHERE id = ? AND telegram_user_id = ?"
+            session = await self.db.fetch_one(sql, active_session_id, telegram_user_id)
+            if session:
+                return session
+
+        # 2. Check the most recent session in conversation_sessions
+        sql_recent = "SELECT id, telegram_user_id, created_at, updated_at FROM conversation_sessions WHERE telegram_user_id = ? ORDER BY id DESC LIMIT 1"
+        recent_session = await self.db.fetch_one(sql_recent, telegram_user_id)
+        if recent_session:
+            settings["active_session_id"] = recent_session["id"]
+            await self.settings_repo.update_settings(telegram_user_id, settings)
+            return recent_session
+
+        # 3. Create a fresh session if none exists
+        return await self.create_new_session(telegram_user_id)
+
+    async def create_new_session(self, telegram_user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Creates a fresh conversation session for the user and points active_session_id to it.
+        Preserves existing user settings.
+        """
+        if not self.db.is_available:
+            return None
+
+        now = _get_utc_now_iso()
+        sql = "INSERT INTO conversation_sessions (telegram_user_id, created_at, updated_at) VALUES (?, ?, ?)"
+        success = await self.db.execute(sql, telegram_user_id, now, now)
+        if not success:
+            return None
+
+        sql_fetch = "SELECT id, telegram_user_id, created_at, updated_at FROM conversation_sessions WHERE telegram_user_id = ? ORDER BY id DESC LIMIT 1"
+        new_session = await self.db.fetch_one(sql_fetch, telegram_user_id)
+        if new_session:
+            settings = await self.settings_repo.get_settings(telegram_user_id)
+            settings["active_session_id"] = new_session["id"]
+            await self.settings_repo.update_settings(telegram_user_id, settings)
+            return new_session
+
+        return None
+
+    async def get_recent_messages(
+        self,
+        telegram_user_id: int,
+        session_id: int,
+        limit: int = CONVERSATION_HISTORY_LIMIT
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves recent messages from the session ordered chronologically (oldest to newest).
+        Enforces strict user isolation.
+        """
+        if not self.db.is_available:
+            return []
+
+        sql = """
+        SELECT id, session_id, telegram_user_id, role, content, created_at
+        FROM conversation_messages
+        WHERE session_id = ? AND telegram_user_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """
+        rows = await self.db.fetch_all(sql, session_id, telegram_user_id, limit)
+        if rows:
+            return list(reversed(rows))
+        return []
+
+    async def add_message(
+        self,
+        telegram_user_id: int,
+        session_id: int,
+        role: str,
+        content: str
+    ) -> bool:
+        """
+        Appends a message to the active session and advances the session updated_at timestamp.
+        Enforces strict session ownership.
+        """
+        if not self.db.is_available:
+            return False
+
+        if role not in ("user", "assistant"):
+            logger.warning(f"Invalid message role '{role}' rejected.")
+            return False
+
+        cleaned_content = content.strip()
+        if not cleaned_content:
+            return False
+
+        # Verify that session_id belongs to telegram_user_id
+        sql_verify = "SELECT id FROM conversation_sessions WHERE id = ? AND telegram_user_id = ?"
+        session = await self.db.fetch_one(sql_verify, session_id, telegram_user_id)
+        if not session:
+            logger.error(f"Cannot add message: session {session_id} does not belong to user {telegram_user_id}")
+            return False
+
+        now = _get_utc_now_iso()
+        sql_insert = """
+        INSERT INTO conversation_messages (session_id, telegram_user_id, role, content, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """
+        inserted = await self.db.execute(sql_insert, session_id, telegram_user_id, role, cleaned_content, now)
+        
+        if inserted:
+            sql_update_sess = "UPDATE conversation_sessions SET updated_at = ? WHERE id = ? AND telegram_user_id = ?"
+            await self.db.execute(sql_update_sess, now, session_id, telegram_user_id)
+            return True
+
+        return False
+
+    async def clear_session(self, telegram_user_id: int, session_id: int) -> bool:
+        """Deletes messages in the given session for the user."""
+        if not self.db.is_available:
+            return False
+        sql = "DELETE FROM conversation_messages WHERE session_id = ? AND telegram_user_id = ?"
+        return await self.db.execute(sql, session_id, telegram_user_id)

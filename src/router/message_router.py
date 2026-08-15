@@ -6,10 +6,10 @@ from config.settings import Settings
 from telegram.client import TelegramClient
 from telegram.auth import is_user_authorized
 from ai.gemini_client import GeminiClient
-from ai.prompts_builder import select_relevant_memories, format_prompt_with_memories
+from ai.prompts_builder import select_relevant_memories, format_prompt_with_context
 from router.command_router import handle_command
 from config.prompts import UNAUTHORIZED_DENIAL_TEXT, IMAGE_ERROR_TEXT, FALLBACK_ERROR_TEXT
-from storage.repositories import UserRepository, MemoryRepository
+from storage.repositories import UserRepository, MemoryRepository, ConversationRepository
 
 logger = logging.getLogger("worker.router")
 
@@ -19,7 +19,8 @@ async def dispatch_telegram_update(
     telegram_client: TelegramClient,
     gemini_client: GeminiClient,
     user_repo: Optional[UserRepository] = None,
-    memory_repo: Optional[MemoryRepository] = None
+    memory_repo: Optional[MemoryRepository] = None,
+    conversation_repo: Optional[ConversationRepository] = None
 ):
     """Processes an incoming Telegram update dictionary."""
     message = update.get("message")
@@ -59,7 +60,8 @@ async def dispatch_telegram_update(
             telegram_client,
             user_id=user_id,
             user_repo=user_repo,
-            memory_repo=memory_repo
+            memory_repo=memory_repo,
+            conversation_repo=conversation_repo
         )
         if handled:
             return
@@ -73,17 +75,45 @@ async def dispatch_telegram_update(
             image_bytes = await telegram_client.get_file_bytes(file_id)
             reply = await gemini_client.generate_vision(image_bytes, caption=caption, model_name=settings.gemini_model)
             await telegram_client.send_message(chat_id, reply, parse_mode="")
+
+            # Store lightweight textual turn in active session if DB available
+            if conversation_repo and user_id and conversation_repo.db.is_available and reply != IMAGE_ERROR_TEXT:
+                try:
+                    active_session = await conversation_repo.get_or_create_active_session(user_id)
+                    if active_session:
+                        user_entry = f"[User sent an image] Caption: {caption}" if caption else "[User sent an image]"
+                        await conversation_repo.add_message(user_id, active_session["id"], "user", user_entry)
+                        await conversation_repo.add_message(user_id, active_session["id"], "assistant", reply)
+                except Exception as e:
+                    logger.error(f"Error storing photo conversation turn: {e}")
         except Exception as e:
             logger.error(f"Error processing photo message: {e}")
             await telegram_client.send_message(chat_id, IMAGE_ERROR_TEXT, parse_mode="")
         return
 
-    # 5. Handle Ordinary Text Messages with Context-Aware Long-Term Memory Injection
+    # 5. Handle Ordinary Text Messages with Session History & Long-Term Memory Context
     if text:
         await telegram_client.send_chat_action(chat_id, "typing")
         try:
-            # Step 5a: Retrieve user's stored memories from D1 (non-blocking / resilient)
+            active_session_id = None
+            recent_history = []
             relevant_memories = []
+
+            # Step 5a: Retrieve active session history from D1 (non-blocking / resilient)
+            if conversation_repo and user_id and conversation_repo.db.is_available:
+                try:
+                    active_session = await conversation_repo.get_or_create_active_session(user_id)
+                    if active_session:
+                        active_session_id = active_session["id"]
+                        recent_history = await conversation_repo.get_recent_messages(
+                            user_id,
+                            active_session_id,
+                            limit=settings.conversation_history_limit
+                        )
+                except Exception as e:
+                    logger.error(f"Error retrieving session history: {e}")
+
+            # Step 5b: Retrieve user's stored long-term memories from D1 (non-blocking / resilient)
             if memory_repo and user_id and memory_repo.db.is_available:
                 try:
                     all_user_memories = await memory_repo.get_all_memories(user_id)
@@ -91,11 +121,32 @@ async def dispatch_telegram_update(
                 except Exception as e:
                     logger.error(f"Error selecting relevant memories: {e}")
 
-            # Step 5b: Construct prompt with relevant long-term memory context (if any match)
-            final_prompt = format_prompt_with_memories(text, relevant_memories)
+            # Step 5c: Format final prompt combining memories, conversation history, and user query
+            final_prompt = format_prompt_with_context(
+                user_query=text,
+                relevant_memories=relevant_memories,
+                conversation_history=recent_history
+            )
 
+            # Step 5d: Execute single Gemini generation call
             reply = await gemini_client.generate_text(final_prompt, model_name=settings.gemini_model)
             await telegram_client.send_message(chat_id, reply, parse_mode="")
+
+            # Step 5e: Persist user and assistant turns in D1 upon success
+            if (
+                conversation_repo
+                and user_id
+                and active_session_id
+                and conversation_repo.db.is_available
+                and reply != FALLBACK_ERROR_TEXT
+                and not reply.startswith("⚠️ Gemini API Error:")
+            ):
+                try:
+                    await conversation_repo.add_message(user_id, active_session_id, "user", text)
+                    await conversation_repo.add_message(user_id, active_session_id, "assistant", reply)
+                except Exception as e:
+                    logger.error(f"Error persisting conversation messages: {e}")
+
         except Exception as e:
             logger.error(f"Error processing text message: {e}")
             await telegram_client.send_message(chat_id, FALLBACK_ERROR_TEXT, parse_mode="")

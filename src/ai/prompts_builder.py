@@ -1,8 +1,8 @@
-"""Payload builders and memory context formatters for Gemini API requests."""
+"""Payload builders, relevance scoring, and context formatters for Gemini API."""
 
 import re
 import base64
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 # Common stop words in English and Roman/Urdu to filter out for keyword matching
 STOP_WORDS = {
@@ -59,7 +59,7 @@ def select_relevant_memories(
         score = float(len(overlap))
         mtype = mem.get("memory_type", "fact").lower()
         if mtype in ("goal", "preference", "instruction"):
-            score += 0.5  # Slight boost for intent-defining memories
+            score += 0.5
 
         scored_memories.append((score, mem))
 
@@ -67,27 +67,57 @@ def select_relevant_memories(
     scored_memories.sort(key=lambda x: (x[0], x[1].get("id", 0)), reverse=True)
     return [item[1] for item in scored_memories[:max_memories]]
 
+def format_prompt_with_context(
+    user_query: str,
+    relevant_memories: Optional[List[Dict[str, Any]]] = None,
+    conversation_history: Optional[List[Dict[str, Any]]] = None
+) -> str:
+    """
+    Constructs the prompt with clearly separated sections:
+    1. Long-term memories (user-provided background context)
+    2. Recent conversation history (active session turns)
+    3. Current user message
+
+    Neither memories nor history are permitted to override system/safety instructions.
+    """
+    sections = []
+
+    # Section 1: Long-term memory context
+    if relevant_memories:
+        mem_lines = []
+        for mem in relevant_memories:
+            mtype = mem.get("memory_type", "Fact").capitalize()
+            content = mem.get("content", "").strip()
+            mem_lines.append(f"- {mtype}: {content}")
+        sections.append(
+            "[LONG-TERM MEMORY — USER PROVIDED CONTEXT]\n" + "\n".join(mem_lines)
+        )
+
+    # Section 2: Recent conversation history
+    if conversation_history:
+        history_lines = []
+        for msg in conversation_history:
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "").strip()
+            if role == "USER":
+                history_lines.append(f"USER: {content}")
+            else:
+                history_lines.append(f"ASSISTANT: {content}")
+        if history_lines:
+            sections.append(
+                "[RECENT CONVERSATION HISTORY]\n" + "\n".join(history_lines)
+            )
+
+    # Section 3: Current user message
+    if sections:
+        sections.append(f"[CURRENT USER MESSAGE]\n{user_query}")
+        return "\n\n".join(sections)
+
+    return user_query
+
 def format_prompt_with_memories(user_query: str, relevant_memories: List[Dict[str, Any]]) -> str:
-    """
-    Formats the prompt injecting relevant memories cleanly separated from the user's message.
-    Memories are explicitly positioned as background context, never overriding system safety.
-    """
-    if not relevant_memories:
-        return user_query
-
-    memory_lines = []
-    for mem in relevant_memories:
-        mtype = mem.get("memory_type", "Fact").capitalize()
-        content = mem.get("content", "").strip()
-        memory_lines.append(f"- {mtype}: {content}")
-
-    memory_block = "\n".join(memory_lines)
-    return (
-        f"[LONG-TERM MEMORY — USER PROVIDED CONTEXT]\n"
-        f"{memory_block}\n\n"
-        f"[CURRENT USER MESSAGE]\n"
-        f"{user_query}"
-    )
+    """Backward-compatible alias for memory-only formatting."""
+    return format_prompt_with_context(user_query, relevant_memories=relevant_memories, conversation_history=None)
 
 def build_text_payload(prompt: str) -> Dict[str, Any]:
     """Constructs a standard generateContent JSON payload for text."""
