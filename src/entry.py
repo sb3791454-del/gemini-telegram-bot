@@ -20,6 +20,7 @@ from storage.repositories import (
     SettingsRepository,
     ConversationRepository,
 )
+from trading.binance_client import BinanceClient
 
 # Configure root worker logger
 logger = logging.getLogger("worker")
@@ -85,6 +86,7 @@ async def on_fetch(request, env):
     user_repo = UserRepository(db)
     memory_repo = MemoryRepository(db)
     conversation_repo = ConversationRepository(db, settings_repo=settings_repo)
+    binance_client = BinanceClient(async_http_request)
 
     # 1. Diagnostic Health Endpoint: GET /health (Safe: exposes zero secrets, tokens, or IDs)
     if path == "/health" and method == "GET":
@@ -95,6 +97,7 @@ async def on_fetch(request, env):
             "active_model": settings.gemini_model,
             "private_mode": settings.is_private_mode_enabled,
             "database_connected": db.is_available,
+            "market_data_engine": "binance-spot-public",
             "env_configured": {
                 "TELEGRAM_BOT_TOKEN": bool(settings.telegram_bot_token),
                 "GEMINI_API_KEY": bool(settings.gemini_api_key),
@@ -112,7 +115,8 @@ async def on_fetch(request, env):
             f"🤖 Sultan Assistant is active on Cloudflare Python Workers!\n"
             f"Active Model: {settings.gemini_model}\n"
             f"Access Mode: {'Enforcing Whitelist' if settings.is_private_mode_enabled else 'Locked (No Allowed Users Configured)'}\n"
-            f"Database: {'Connected (D1)' if db.is_available else 'Offline / Ephemeral'}\n\n"
+            f"Database: {'Connected (D1)' if db.is_available else 'Offline / Ephemeral'}\n"
+            f"Market Data: Connected (Binance Spot REST)\n\n"
             "Endpoints:\n"
             "- GET /health       : System and configuration status\n"
             "- GET /set_webhook  : Register Telegram webhook\n"
@@ -176,7 +180,8 @@ async def on_fetch(request, env):
                 gemini_client,
                 user_repo=user_repo,
                 memory_repo=memory_repo,
-                conversation_repo=conversation_repo
+                conversation_repo=conversation_repo,
+                binance_client=binance_client
             )
             return json_response({"ok": True})
         except Exception as e:

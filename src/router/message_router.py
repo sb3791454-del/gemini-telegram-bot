@@ -1,4 +1,4 @@
-"""Main update and message dispatcher."""
+"""Main update and message dispatcher with strict deterministic command interception."""
 
 import logging
 from typing import Optional
@@ -10,6 +10,7 @@ from ai.prompts_builder import select_relevant_memories, format_prompt_with_cont
 from router.command_router import handle_command
 from config.prompts import UNAUTHORIZED_DENIAL_TEXT, IMAGE_ERROR_TEXT, FALLBACK_ERROR_TEXT
 from storage.repositories import UserRepository, MemoryRepository, ConversationRepository
+from trading.binance_client import BinanceClient
 
 logger = logging.getLogger("worker.router")
 
@@ -20,7 +21,8 @@ async def dispatch_telegram_update(
     gemini_client: GeminiClient,
     user_repo: Optional[UserRepository] = None,
     memory_repo: Optional[MemoryRepository] = None,
-    conversation_repo: Optional[ConversationRepository] = None
+    conversation_repo: Optional[ConversationRepository] = None,
+    binance_client: Optional[BinanceClient] = None,
 ):
     """Processes an incoming Telegram update dictionary."""
     message = update.get("message")
@@ -53,7 +55,15 @@ async def dispatch_telegram_update(
     caption = message.get("caption", "").strip()
 
     # 3. Check for Commands (Evaluated before any Gemini calls)
-    if text.startswith("/"):
+    # Check leading slash or bot_command entity
+    is_command = text.startswith("/")
+    if not is_command and "entities" in message:
+        for ent in message.get("entities", []):
+            if ent.get("type") == "bot_command" and ent.get("offset") == 0:
+                is_command = True
+                break
+
+    if is_command:
         handled = await handle_command(
             text,
             chat_id,
@@ -61,7 +71,8 @@ async def dispatch_telegram_update(
             user_id=user_id,
             user_repo=user_repo,
             memory_repo=memory_repo,
-            conversation_repo=conversation_repo
+            conversation_repo=conversation_repo,
+            binance_client=binance_client
         )
         if handled:
             return
