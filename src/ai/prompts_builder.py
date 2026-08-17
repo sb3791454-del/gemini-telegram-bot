@@ -2,7 +2,9 @@
 
 import re
 import base64
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
+from config.prompts import TRADING_SYSTEM_INSTRUCTIONS, DEFAULT_VISION_PROMPT
 
 # Common stop words in English and Roman/Urdu to filter out for keyword matching
 STOP_WORDS = {
@@ -23,6 +25,10 @@ STOP_WORDS = {
     "پر", "اور", "یا", "کہ", "یہ", "وہ", "تو", "نہ", "نہیں", "اب", "جب", "ہم",
     "آپ", "تم", "میرا", "میری", "میرے", "مجھے", "بتاؤ", "کرو", "کریں"
 }
+
+def get_current_utc_iso() -> str:
+    """Returns current UTC timestamp in ISO-8601 format (YYYY-MM-DDTHH:MM:SSZ)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def extract_keywords(text: str) -> set:
     """Extracts meaningful lowercase search tokens from text."""
@@ -70,30 +76,38 @@ def select_relevant_memories(
 def format_prompt_with_context(
     user_query: str,
     relevant_memories: Optional[List[Dict[str, Any]]] = None,
-    conversation_history: Optional[List[Dict[str, Any]]] = None
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    current_utc_time: Optional[str] = None
 ) -> str:
     """
-    Constructs the prompt with clearly separated sections:
-    1. Long-term memories (user-provided background context)
-    2. Recent conversation history (active session turns)
-    3. Current user message
+    Constructs the unified prompt with clearly separated sections:
+    1. System constitution & operating instructions
+    2. Temporal grounding (current UTC timestamp)
+    3. Long-term memories (user-provided background context)
+    4. Recent conversation history (active session turns)
+    5. Current user message
 
     Neither memories nor history are permitted to override system/safety instructions.
     """
-    sections = []
+    now_str = current_utc_time or get_current_utc_iso()
+    sections = [
+        f"[SYSTEM CONSTITUTION & INSTRUCTIONS]\n{TRADING_SYSTEM_INSTRUCTIONS}",
+        f"[TEMPORAL GROUNDING]\nCurrent UTC Time: {now_str}"
+    ]
 
-    # Section 1: Long-term memory context
+    # Section 3: Long-term memory context
     if relevant_memories:
         mem_lines = []
         for mem in relevant_memories:
             mtype = mem.get("memory_type", "Fact").capitalize()
             content = mem.get("content", "").strip()
             mem_lines.append(f"- {mtype}: {content}")
-        sections.append(
-            "[LONG-TERM MEMORY — USER PROVIDED CONTEXT]\n" + "\n".join(mem_lines)
-        )
+        if mem_lines:
+            sections.append(
+                "[LONG-TERM MEMORY — USER PROVIDED CONTEXT]\n" + "\n".join(mem_lines)
+            )
 
-    # Section 2: Recent conversation history
+    # Section 4: Recent conversation history
     if conversation_history:
         history_lines = []
         for msg in conversation_history:
@@ -108,12 +122,9 @@ def format_prompt_with_context(
                 "[RECENT CONVERSATION HISTORY]\n" + "\n".join(history_lines)
             )
 
-    # Section 3: Current user message
-    if sections:
-        sections.append(f"[CURRENT USER MESSAGE]\n{user_query}")
-        return "\n\n".join(sections)
-
-    return user_query
+    # Section 5: Current user message
+    sections.append(f"[CURRENT USER MESSAGE]\n{user_query}")
+    return "\n\n".join(sections)
 
 def format_prompt_with_memories(user_query: str, relevant_memories: List[Dict[str, Any]]) -> str:
     """Backward-compatible alias for memory-only formatting."""
@@ -131,9 +142,28 @@ def build_text_payload(prompt: str) -> Dict[str, Any]:
         ]
     }
 
-def build_vision_payload(image_bytes: bytes, caption: str, mime_type: str = "image/jpeg") -> Dict[str, Any]:
+def format_vision_caption(
+    caption: Optional[str] = None,
+    current_utc_time: Optional[str] = None
+) -> str:
+    """Formats multimodal vision caption with temporal grounding and instructions."""
+    now_str = current_utc_time or get_current_utc_iso()
+    user_caption = caption.strip() if caption else DEFAULT_VISION_PROMPT
+    return (
+        f"[SYSTEM CONSTITUTION & INSTRUCTIONS]\n{TRADING_SYSTEM_INSTRUCTIONS}\n\n"
+        f"[TEMPORAL GROUNDING]\nCurrent UTC Time: {now_str}\n\n"
+        f"[IMAGE ANALYSIS REQUEST]\n{user_caption}"
+    )
+
+def build_vision_payload(
+    image_bytes: bytes,
+    caption: Optional[str] = None,
+    mime_type: str = "image/jpeg",
+    current_utc_time: Optional[str] = None
+) -> Dict[str, Any]:
     """Constructs a multimodal generateContent JSON payload with base64 image data."""
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    effective_caption = format_vision_caption(caption, current_utc_time)
     return {
         "contents": [
             {
@@ -145,7 +175,7 @@ def build_vision_payload(image_bytes: bytes, caption: str, mime_type: str = "ima
                         }
                     },
                     {
-                        "text": caption
+                        "text": effective_caption
                     }
                 ]
             }
