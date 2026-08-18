@@ -17,7 +17,7 @@ class BinanceAPIError(Exception):
 
 class BinanceClient:
     """Free public Binance Spot REST client (zero authentication required)."""
-    BASE_URL = "https://api.binance.com"
+    BASE_URL = "https://data-api.binance.vision"
 
     def __init__(self, http_fetch_fn):
         self.fetch_fn = http_fetch_fn
