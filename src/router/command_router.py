@@ -149,15 +149,15 @@ async def handle_command(
         try:
             active_session = await conversation_repo.get_or_create_active_session(user_id)
             if not active_session:
-                await telegram_client.send_message(chat_id, "🗨️ *موجودہ سیشن میں کوئی پچھلی گفتگو موجود نہیں ہے۔*", parse_mode="Markdown")
+                await telegram_client.send_message(chat_id, "ℹ️ کوئی فعال سیشن موجود نہیں ہے۔ نیا پیغام بھیج کر گفتگو شروع کریں۔", parse_mode="")
                 return True
 
             messages = await conversation_repo.get_recent_messages(user_id, active_session["id"], limit=10)
             if not messages:
-                await telegram_client.send_message(chat_id, "🗨️ *موجودہ سیشن میں کوئی پچھلی گفتگو موجود نہیں ہے۔*", parse_mode="Markdown")
+                await telegram_client.send_message(chat_id, "ℹ️ اس سیشن میں ابھی تک کوئی گفتگو نہیں ہوئی۔", parse_mode="")
                 return True
 
-            lines = ["🗨️ *موجودہ سیشن کی گفتگو (Recent Session History):*\n"]
+            lines = ["📜 *موجودہ سیشن کی گفتگو (Session History):*\n"]
             for idx, msg in enumerate(messages, start=1):
                 sender = "You" if msg.get("role") == "user" else "Sultan Assistant"
                 content = msg.get("content", "").strip()
@@ -258,7 +258,7 @@ async def handle_command(
             logger.error(f"Binance ticker error: {be}")
             await telegram_client.send_message(
                 chat_id,
-                f"⚠️ *Market Data Error:*\\n{str(be)}\n\n_No market value or analysis will be guessed._",
+                f"⚠️ *Market Data Error:*\n{str(be)}\n\n_No market value or analysis will be guessed._",
                 parse_mode="Markdown"
             )
         except Exception as e:
@@ -324,42 +324,30 @@ async def handle_command(
         if not content:
             msg = (
                 "ℹ️ *درست طریقہ استعمال (Usage):*\n"
-                "`/remember <معلومات یا ہدف>`\n\n"
-                "*مثالیں (Examples):*\n"
-                "• `/remember I want to become an embedded systems engineer.`\n"
-                "• `/remember I prefer explanations in simple Urdu and English.`"
+                "`/remember <معلومات یا ترجیحات>`\n\n"
+                "*مثال:*\n"
+                "`/remember مجھے مختصر اور ٹو دی پوائنٹ جوابات پسند ہیں۔`"
             )
             await telegram_client.send_message(chat_id, msg, parse_mode="Markdown")
             return True
 
         if not memory_repo or not memory_repo.db.is_available or not user_id:
-            await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔ یادداشت محفوظ نہیں ہو سکی۔ (Database offline)", parse_mode="")
+            await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔ (Database offline)", parse_mode="")
             return True
 
-        mtype = infer_memory_type(content)
-        res = await memory_repo.add_memory(user_id, mtype, content)
-        
-        if res.get("success"):
+        try:
+            mtype = infer_memory_type(content)
+            mem_id = await memory_repo.add_memory(user_id, content, memory_type=mtype)
             saved_msg = (
-                f"✅ *یادداشت محفوظ کر لی گئی ہے (Memory Saved):*\n"
-                f"• *Type:* `{mtype.capitalize()}`\n"
-                f"• *Content:* {content}"
+                f"💾 *یادداشت کامیابی کے ساتھ محفوظ کر لی گئی ہے! (Memory Saved)*\n\n"
+                f"• *ID:* `{mem_id}`\n"
+                f"• *نوعیت (Type):* `{mtype}`\n"
+                f"• *متن (Content):* {content}\n\n"
+                f"_یہ معلومات مستقبل کی گفتگو میں بطور حوالہ استعمال ہوگی۔_"
             )
             await telegram_client.send_message(chat_id, saved_msg, parse_mode="Markdown")
-        elif res.get("reason") == "duplicate":
-            dup_msg = (
-                "ℹ️ *پہلے سے موجود ہے (Already Remembered):*\n"
-                "یہ ہو بہو معلومات آپ کی یادداشت میں پہلے سے محفوظ ہیں۔"
-            )
-            await telegram_client.send_message(chat_id, dup_msg, parse_mode="Markdown")
-        elif res.get("reason") == "limit_reached":
-            limit_msg = (
-                f"⚠️ *میموری کی حد مکمل ہو چکی ہے (Memory Limit Reached):*\n"
-                f"آپ کی محفوظ کردہ یادداشتوں کی حد ({res.get('limit', 100)}) پوری ہو چکی ہے۔ "
-                f"نئی یادداشت کے لیے `/forget <نمبر>` کے ذریعے پرانی یادداشتیں ڈیلیٹ کریں۔"
-            )
-            await telegram_client.send_message(chat_id, limit_msg, parse_mode="Markdown")
-        else:
+        except Exception as e:
+            logger.error(f"Error adding memory: {e}")
             await telegram_client.send_message(chat_id, "⚠️ معذرت، ڈیٹا بیس ایرر کے باعث یادداشت محفوظ نہیں ہو سکی۔", parse_mode="")
         return True
 
@@ -368,39 +356,43 @@ async def handle_command(
             await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔", parse_mode="")
             return True
 
-        memories = await memory_repo.get_all_memories(user_id)
-        if not memories:
-            empty_msg = (
-                "🧠 *کوئی مستقل یادداشت محفوظ نہیں ہے (No Memories Stored):*\n"
-                "نئی معلومات محفوظ کرنے کے لیے `/remember <معلومات>` لکھیں۔"
-            )
-            await telegram_client.send_message(chat_id, empty_msg, parse_mode="Markdown")
-            return True
+        try:
+            memories = await memory_repo.get_all_memories(user_id)
+            if not memories:
+                await telegram_client.send_message(
+                    chat_id,
+                    "ℹ️ آپ کے پاس ابھی کوئی محفوظ شدہ یادداشت نہیں ہے۔ نئی یادداشت کے لیے `/remember <متن>` استعمال کریں۔",
+                    parse_mode="Markdown"
+                )
+                return True
 
-        lines = [f"🧠 *آپ کی مستقل یادداشتیں (Your Memories - {len(memories)}/100):*\n"]
-        for idx, mem in enumerate(memories, start=1):
-            mtype = mem.get("memory_type", "Fact").capitalize()
-            content = mem.get("content", "").strip()
-            lines.append(f"{idx}. `[{mtype}]` {content}")
+            lines = ["🧠 *آپ کی محفوظ شدہ مستقل یادداشتیں (Long-term Memories):*\n"]
+            for idx, mem in enumerate(memories, start=1):
+                mtype = mem.get("memory_type", "fact")
+                content = mem.get("content", "")
+                lines.append(f"{idx}. *[{mtype.capitalize()}]* `{content}`")
 
-        lines.append("\n_کسی یادداشت کو ڈیلیٹ کرنے کے لیے `/forget <نمبر>` لکھیں۔_")
-        await telegram_client.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+            lines.append("\n_کسی یادداشت کو ڈیلیٹ کرنے کے لیے `/forget <نمبر>` لکھیں۔_")
+            await telegram_client.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error fetching memories: {e}")
+            await telegram_client.send_message(chat_id, "⚠️ یادداشتیں لانے میں مسئلہ پیش آیا۔", parse_mode="")
         return True
 
     if cmd == "/forgetall_confirm":
         if not memory_repo or not memory_repo.db.is_available or not user_id:
             await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔", parse_mode="")
             return True
-
-        await memory_repo.delete_all_memories(user_id)
-        await telegram_client.send_message(chat_id, "🗑️ *تمام مستقل یادداشتیں کامیابی کے ساتھ ڈیلیٹ کر دی گئی ہیں (All Memories Deleted).*", parse_mode="Markdown")
+        await memory_repo.clear_all_memories(user_id)
+        await telegram_client.send_message(chat_id, "🗑️ *تمام مستقل یادداشتیں کامیابی کے ساتھ ڈیلیٹ کر دی گئی ہیں (All Memories Deleted).* ", parse_mode="Markdown")
         return True
 
     if cmd == "/forgetall":
         warn_msg = (
             "⚠️ *انتباہ (Warning):*\n"
             "اس عمل سے آپ کی تمام مستقل یادداشتیں ہمیشہ کے لیے ڈیلیٹ ہو جائیں گی۔\n\n"
-            "تصدیق کے لیے `/forgetall_confirm` لکھ کر بھیجیں۔"
+            "تصدیق کے لیے درج ذیل کمانڈ لکھیں:\n"
+            "`/forgetall_confirm`"
         )
         await telegram_client.send_message(chat_id, warn_msg, parse_mode="Markdown")
         return True
@@ -409,8 +401,8 @@ async def handle_command(
         if not args or not args.isdigit():
             msg = (
                 "ℹ️ *درست طریقہ استعمال (Usage):*\n"
-                "`/forget <یادداشت کا نمبر>`\n\n"
-                "پہلے `/memories` لکھ کر اپنی فہرست اور نمبر چیک کریں۔"
+                "`/forget <یادداشت نمبر>`\n\n"
+                "یادداشتوں کے نمبر دیکھنے کے لیے پہلے `/memories` چیک کریں۔"
             )
             await telegram_client.send_message(chat_id, msg, parse_mode="Markdown")
             return True
@@ -422,8 +414,7 @@ async def handle_command(
         target_idx = int(args)
         memories = await memory_repo.get_all_memories(user_id)
         if target_idx < 1 or target_idx > len(memories):
-            err_msg = f"⚠️ *غلط نمبر:* آپ کی کل {len(memories)} یادداشتیں ہیں۔ فہرست دیکھنے کے لیے `/memories` لکھیں۔"
-            await telegram_client.send_message(chat_id, err_msg, parse_mode="Markdown")
+            await telegram_client.send_message(chat_id, f"⚠️ نمبر {target_idx} پر کوئی یادداشت موجود نہیں ہے۔", parse_mode="")
             return True
 
         target_mem = memories[target_idx - 1]
@@ -438,25 +429,27 @@ async def handle_command(
         if user_repo and user_repo.db.is_available:
             try:
                 profile = await user_repo.get_user_profile(user_id) if user_id else None
-                mem_count = await memory_repo.count_memories(user_id) if (memory_repo and user_id) else 0
-                has_profile = profile is not None
+                mem_count = await memory_repo.get_memory_count(user_id) if (memory_repo and user_id) else 0
+                msg_count = await conversation_repo.get_total_message_count(user_id) if (conversation_repo and user_id) else 0
                 
                 resp_text = (
-                    "🧠 *Memory & State Status:*\n"
-                    "• Database: Connected (D1 Active)\n"
-                    f"• User Profile: {'Available' if has_profile else 'Not Created Yet'}\n"
-                    f"• Long-term Memories: {mem_count} / 100\n"
+                    f"🧠 *اسٹیٹس اور یادداشت (State & Memory Status)*\n\n"
+                    f"• *D1 Database:* `Connected (Active)`\n"
+                    f"• *صارف کا نام:* {profile.get('display_name') if profile else 'N/A'}\n"
+                    f"• *Telegram ID:* `{user_id}`\n"
+                    f"• *محفوظ شدہ یادداشتیں (Memories):* `{mem_count}`\n"
+                    f"• *کل پیغامات (Total Messages):* `{msg_count}`\n\n"
+                    f"_یادداشتیں دیکھنے کے لیے `/memories` استعمال کریں۔_"
                 )
-                if profile and profile.get("last_seen_at"):
-                    resp_text += f"• Last Active: {profile['last_seen_at'][:19].replace('T', ' ')} UTC\n"
-            except Exception:
-                resp_text = "🧠 *Memory Status:* Active (D1 Error occurred)"
+            except Exception as e:
+                logger.error(f"Error fetching memory status: {e}")
+                resp_text = "⚠️ میموری اسٹیٹس لانے میں مسئلہ پیش آیا۔"
         else:
             resp_text = (
-                "🧠 *Memory & State Status:*\n"
-                "• Database: Offline (D1 binding not attached)\n"
-                "• User Profile: Ephemeral (In-Memory)\n"
-                "• Long-term Memories: 0"
+                "🧠 *اسٹیٹس (State Status)*\n\n"
+                "• *D1 Database:* `Offline / Unbound`\n"
+                "• *موڈ:* `عارضی سیشن (Ephemeral)`\n\n"
+                "_ڈیٹا بیس فعال کرنے کے لیے `ASSISTANT_DB` بائنڈنگ ترتیب دیں۔_"
             )
         await telegram_client.send_message(chat_id, resp_text, parse_mode="Markdown")
         return True

@@ -8,12 +8,46 @@ from trading.models import PriceTicker, Ticker24h, OrderBookDepth
 
 logger = logging.getLogger("worker.trading.binance")
 
+
 class BinanceAPIError(Exception):
     """Custom exception for Binance API errors."""
     def __init__(self, message: str, status_code: Optional[int] = None, error_code: Optional[int] = None):
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
+
+
+def handle_binance_error_response(status: int, resp_text: str) -> None:
+    """
+    Deterministically sanitizes and handles HTTP error responses from Binance API.
+    Guarantees raw upstream HTML/error bodies (CloudFront, Cloudflare, Ray IDs, etc.)
+    never leak into exceptions, logs, Telegram, or Gemini context.
+    """
+    if status == 429:
+        raise BinanceAPIError("Rate limit reached (HTTP 429).", status_code=429)
+    if status == 418:
+        raise BinanceAPIError("IP temporarily banned by Binance (HTTP 418).", status_code=418)
+
+    error_code = None
+    if resp_text and isinstance(resp_text, str):
+        trimmed = resp_text.strip()
+        if trimmed.startswith("{") and trimmed.endswith("}"):
+            try:
+                err_json = json.loads(trimmed)
+                if isinstance(err_json, dict):
+                    raw_code = err_json.get("code")
+                    if isinstance(raw_code, (int, float)):
+                        error_code = int(raw_code)
+                    elif isinstance(raw_code, str) and (raw_code.isdigit() or (raw_code.startswith("-") and raw_code[1:].isdigit())):
+                        error_code = int(raw_code)
+            except Exception:
+                pass
+
+    if error_code is not None:
+        raise BinanceAPIError(f"Binance returned error status {status} (code {error_code}).", status_code=status, error_code=error_code)
+
+    raise BinanceAPIError(f"Binance returned error status {status}.", status_code=status)
+
 
 class BinanceClient:
     """Free public Binance Spot REST client (zero authentication required)."""
@@ -51,18 +85,8 @@ class BinanceClient:
             status = getattr(resp, "status", 200)
             resp_text = await resp.text()
             
-            if status == 429:
-                raise BinanceAPIError("Rate limit reached (HTTP 429). Please try again in a few moments.", status_code=429)
-            if status == 418:
-                raise BinanceAPIError("IP temporarily banned by Binance (HTTP 418).", status_code=418)
             if status >= 400:
-                try:
-                    err_json = json.loads(resp_text)
-                    msg = err_json.get("msg", resp_text)
-                    code = err_json.get("code")
-                    raise BinanceAPIError(f"Binance API error: {msg}", status_code=status, error_code=code)
-                except (json.JSONDecodeError, ValueError):
-                    raise BinanceAPIError(f"Binance returned error status {status}: {resp_text}", status_code=status)
+                handle_binance_error_response(status, resp_text)
 
             try:
                 data = json.loads(resp_text)
@@ -78,13 +102,11 @@ class BinanceClient:
                 price=float(data["price"]),
                 timestamp=now_iso
             )
-        except BinanceAPIError:
-            raise
-        except ValueError:
+        except (BinanceAPIError, ValueError):
             raise
         except Exception as e:
             logger.error(f"Error fetching Binance price for {symbol}: {e}")
-            raise BinanceAPIError(f"Failed to connect to Binance market feed: {str(e)}")
+            raise BinanceAPIError("Failed to connect to Binance market feed.")
 
     async def get_24h_ticker(self, symbol: str) -> Ticker24h:
         """Fetches 24-hour rolling statistics for a symbol."""
@@ -96,16 +118,8 @@ class BinanceClient:
             status = getattr(resp, "status", 200)
             resp_text = await resp.text()
             
-            if status == 429:
-                raise BinanceAPIError("Rate limit reached (HTTP 429). Please try again in a few moments.", status_code=429)
             if status >= 400:
-                try:
-                    err_json = json.loads(resp_text)
-                    msg = err_json.get("msg", resp_text)
-                    code = err_json.get("code")
-                    raise BinanceAPIError(f"Binance API error: {msg}", status_code=status, error_code=code)
-                except (json.JSONDecodeError, ValueError):
-                    raise BinanceAPIError(f"Binance returned error status {status}", status_code=status)
+                handle_binance_error_response(status, resp_text)
 
             try:
                 data = json.loads(resp_text)
@@ -127,13 +141,11 @@ class BinanceClient:
                 quote_volume=float(data.get("quoteVolume", 0.0)),
                 timestamp=now_iso
             )
-        except BinanceAPIError:
-            raise
-        except ValueError:
+        except (BinanceAPIError, ValueError):
             raise
         except Exception as e:
             logger.error(f"Error fetching Binance 24h ticker for {symbol}: {e}")
-            raise BinanceAPIError(f"Failed to connect to Binance 24hr feed: {str(e)}")
+            raise BinanceAPIError("Failed to connect to Binance 24hr feed.")
 
     async def get_order_book_depth(self, symbol: str, limit: int = 5) -> OrderBookDepth:
         """Fetches top bids and asks from order book depth."""
@@ -145,16 +157,8 @@ class BinanceClient:
             status = getattr(resp, "status", 200)
             resp_text = await resp.text()
             
-            if status == 429:
-                raise BinanceAPIError("Rate limit reached (HTTP 429). Please try again in a few moments.", status_code=429)
             if status >= 400:
-                try:
-                    err_json = json.loads(resp_text)
-                    msg = err_json.get("msg", resp_text)
-                    code = err_json.get("code")
-                    raise BinanceAPIError(f"Binance API error: {msg}", status_code=status, error_code=code)
-                except (json.JSONDecodeError, ValueError):
-                    raise BinanceAPIError(f"Binance returned error status {status}", status_code=status)
+                handle_binance_error_response(status, resp_text)
 
             try:
                 data = json.loads(resp_text)
@@ -183,10 +187,8 @@ class BinanceClient:
                 spread_percentage=spread_pct,
                 timestamp=now_iso
             )
-        except BinanceAPIError:
-            raise
-        except ValueError:
+        except (BinanceAPIError, ValueError):
             raise
         except Exception as e:
             logger.error(f"Error fetching Binance depth for {symbol}: {e}")
-            raise BinanceAPIError(f"Failed to connect to Binance depth feed: {str(e)}")
+            raise BinanceAPIError("Failed to connect to Binance depth feed.")
