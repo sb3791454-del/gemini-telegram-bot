@@ -1,4 +1,4 @@
-"""Payload builders, relevance scoring, and context formatters for Gemini API."""
+"""Payload builders, relevance scoring, and context formatters for Gemini API with live market grounding."""
 
 import re
 import base64
@@ -26,16 +26,68 @@ STOP_WORDS = {
     "آپ", "تم", "میرا", "میری", "میرے", "مجھے", "بتاؤ", "کرو", "کریں"
 }
 
+# Crypto symbol mappings for automated context extraction
+CRYPTO_ALIASES = {
+    "BITCOIN": "BTCUSDT", "BTC": "BTCUSDT",
+    "ETHEREUM": "ETHUSDT", "ETH": "ETHUSDT",
+    "SOLANA": "SOLUSDT", "SOL": "SOLUSDT",
+    "BINANCE": "BNBUSDT", "BNB": "BNBUSDT",
+    "RIPPLE": "XRPUSDT", "XRP": "XRPUSDT",
+    "CARDANO": "ADAUSDT", "ADA": "ADAUSDT",
+    "DOGECOIN": "DOGEUSDT", "DOGE": "DOGEUSDT",
+    "AVALANCHE": "AVAXUSDT", "AVAX": "AVAXUSDT",
+    "POLKADOT": "DOTUSDT", "DOT": "DOTUSDT",
+    "CHAINLINK": "LINKUSDT", "LINK": "LINKUSDT",
+    "NEAR": "NEARUSDT",
+    "SUI": "SUIUSDT",
+    "APTOS": "APTUSDT", "APT": "APTUSDT",
+    "POLYGON": "MATICUSDT", "MATIC": "MATICUSDT",
+    "LITECOIN": "LTCUSDT", "LTC": "LTCUSDT",
+    "PEPE": "PEPEUSDT",
+    "SHIBA": "SHIBUSDT", "SHIB": "SHIBUSDT",
+    "TONCOIN": "TONUSDT", "TON": "TONUSDT",
+    "TRON": "TRXUSDT", "TRX": "TRXUSDT",
+    "UNISWAP": "UNIUSDT", "UNI": "UNIUSDT",
+    "BITCOINCASH": "BCHUSDT", "BCH": "BCHUSDT",
+    "TETHER": "USDT", "USDT": "USDT",
+}
+
+
 def get_current_utc_iso() -> str:
     """Returns current UTC timestamp in ISO-8601 format (YYYY-MM-DDTHH:MM:SSZ)."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def extract_keywords(text: str) -> set:
     """Extracts meaningful lowercase search tokens from text."""
     if not text:
         return set()
-    words = re.findall(r'\b[\w\u0600-\u06FF]+\b', text.lower())
+    words = re.findall(r"\b[\w\u0600-\u06FF]+\b", text.lower())
     return {w for w in words if len(w) > 2 and w not in STOP_WORDS}
+
+
+def extract_crypto_symbols(text: str, max_symbols: int = 2) -> List[str]:
+    """
+    Extracts referenced cryptocurrency trading pairs from natural language query.
+    e.g. 'Can you analyze Bitcoin and Solana?' -> ['BTCUSDT', 'SOLUSDT']
+    """
+    if not text:
+        return []
+    
+    found = []
+    tokens = re.findall(r"\b[a-zA-Z0-9_]+\b", text.upper())
+    for t in tokens:
+        if t in CRYPTO_ALIASES and CRYPTO_ALIASES[t] not in found:
+            found.append(CRYPTO_ALIASES[t])
+            if len(found) >= max_symbols:
+                break
+        elif t.endswith("USDT") and len(t) >= 6 and t not in found:
+            found.append(t)
+            if len(found) >= max_symbols:
+                break
+
+    return found
+
 
 def select_relevant_memories(
     query: str,
@@ -69,25 +121,25 @@ def select_relevant_memories(
 
         scored_memories.append((score, mem))
 
-    # Sort by score descending, then by creation date/ID descending
     scored_memories.sort(key=lambda x: (x[0], x[1].get("id", 0)), reverse=True)
     return [item[1] for item in scored_memories[:max_memories]]
+
 
 def format_prompt_with_context(
     user_query: str,
     relevant_memories: Optional[List[Dict[str, Any]]] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
-    current_utc_time: Optional[str] = None
+    current_utc_time: Optional[str] = None,
+    market_grounding_text: Optional[str] = None,
 ) -> str:
     """
     Constructs the unified prompt with clearly separated sections:
     1. System constitution & operating instructions
     2. Temporal grounding (current UTC timestamp)
-    3. Long-term memories (user-provided background context)
-    4. Recent conversation history (active session turns)
-    5. Current user message
-
-    Neither memories nor history are permitted to override system/safety instructions.
+    3. Verified live market grounding (if crypto query detected)
+    4. Long-term memories (user-provided background context)
+    5. Recent conversation history (active session turns)
+    6. Current user message
     """
     now_str = current_utc_time or get_current_utc_iso()
     sections = [
@@ -95,7 +147,16 @@ def format_prompt_with_context(
         f"[TEMPORAL GROUNDING]\nCurrent UTC Time: {now_str}"
     ]
 
-    # Section 3: Long-term memory context
+    # Section 3: Verified live market grounding
+    if market_grounding_text:
+        sections.append(
+            "[LIVE VERIFIED MARKET GROUNDING — STRICT REAL-TIME DATA]\n"
+            "The following verified live market data was retrieved directly from exchange feeds at this exact moment.\n"
+            "You MUST treat these numbers as indisputable ground truth. Never hallucinate, invent, or contradict these figures.\n\n"
+            f"{market_grounding_text}"
+        )
+
+    # Section 4: Long-term memory context
     if relevant_memories:
         mem_lines = []
         for mem in relevant_memories:
@@ -107,7 +168,7 @@ def format_prompt_with_context(
                 "[LONG-TERM MEMORY — USER PROVIDED CONTEXT]\n" + "\n".join(mem_lines)
             )
 
-    # Section 4: Recent conversation history
+    # Section 5: Recent conversation history
     if conversation_history:
         history_lines = []
         for msg in conversation_history:
@@ -122,13 +183,15 @@ def format_prompt_with_context(
                 "[RECENT CONVERSATION HISTORY]\n" + "\n".join(history_lines)
             )
 
-    # Section 5: Current user message
+    # Section 6: Current user message
     sections.append(f"[CURRENT USER MESSAGE]\n{user_query}")
     return "\n\n".join(sections)
+
 
 def format_prompt_with_memories(user_query: str, relevant_memories: List[Dict[str, Any]]) -> str:
     """Backward-compatible alias for memory-only formatting."""
     return format_prompt_with_context(user_query, relevant_memories=relevant_memories, conversation_history=None)
+
 
 def build_text_payload(prompt: str) -> Dict[str, Any]:
     """Constructs a standard generateContent JSON payload for text."""
@@ -142,6 +205,7 @@ def build_text_payload(prompt: str) -> Dict[str, Any]:
         ]
     }
 
+
 def format_vision_caption(
     caption: Optional[str] = None,
     current_utc_time: Optional[str] = None
@@ -154,6 +218,7 @@ def format_vision_caption(
         f"[TEMPORAL GROUNDING]\nCurrent UTC Time: {now_str}\n\n"
         f"[IMAGE ANALYSIS REQUEST]\n{user_caption}"
     )
+
 
 def build_vision_payload(
     image_bytes: bytes,

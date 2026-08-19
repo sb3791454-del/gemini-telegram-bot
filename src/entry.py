@@ -19,12 +19,14 @@ from storage.repositories import (
     MemoryRepository,
     SettingsRepository,
     ConversationRepository,
+    WatchlistRepository,
 )
 from trading.binance_client import BinanceClient
 
 # Configure root worker logger
 logger = logging.getLogger("worker")
 logger.setLevel(logging.INFO)
+
 
 def json_response(data: dict, status: int = 200) -> Response:
     """Helper to construct JSON HTTP Response for Cloudflare Workers."""
@@ -41,6 +43,7 @@ def json_response(data: dict, status: int = 200) -> Response:
     )
     return Response.new(json.dumps(data, ensure_ascii=False), options)
 
+
 def text_response(text: str, status: int = 200) -> Response:
     """Helper to construct plain text HTTP Response for Cloudflare Workers."""
     headers = to_js(
@@ -56,6 +59,7 @@ def text_response(text: str, status: int = 200) -> Response:
     )
     return Response.new(text, options)
 
+
 async def async_http_request(url: str, method: str = "GET", headers: dict | None = None, body: str | None = None):
     """Native asynchronous HTTP request wrapper using Cloudflare Workers JavaScript fetch."""
     opts = {"method": method}
@@ -67,6 +71,7 @@ async def async_http_request(url: str, method: str = "GET", headers: dict | None
     js_opts = to_js(opts, dict_converter=Object.fromEntries)
     resp = await fetch(url, js_opts)
     return resp
+
 
 async def on_fetch(request, env):
     """Cloudflare Python Worker primary fetch handler."""
@@ -86,6 +91,7 @@ async def on_fetch(request, env):
     user_repo = UserRepository(db)
     memory_repo = MemoryRepository(db)
     conversation_repo = ConversationRepository(db, settings_repo=settings_repo)
+    watchlist_repo = WatchlistRepository(db)
     binance_client = BinanceClient(async_http_request)
 
     # 1. Diagnostic Health Endpoint: GET /health (Safe: exposes zero secrets, tokens, or IDs)
@@ -94,10 +100,11 @@ async def on_fetch(request, env):
             "status": "ok",
             "service": "sultan-assistant",
             "runtime": "cloudflare-python-worker",
+            "phase": "phase-8-technical-analysis-and-risk-engine",
             "active_model": settings.gemini_model,
             "private_mode": settings.is_private_mode_enabled,
             "database_connected": db.is_available,
-            "market_data_engine": "binance-spot-public",
+            "market_data_engine": "multi-exchange-spot-kline-resilient",
             "env_configured": {
                 "TELEGRAM_BOT_TOKEN": bool(settings.telegram_bot_token),
                 "GEMINI_API_KEY": bool(settings.gemini_api_key),
@@ -111,12 +118,15 @@ async def on_fetch(request, env):
 
     # 2. Root Overview Endpoint: GET /
     if path == "/" and method == "GET":
+        mode_str = "Enforcing Whitelist" if settings.is_private_mode_enabled else "Locked (No Allowed Users Configured)"
+        db_str = "Connected (D1)" if db.is_available else "Offline / Ephemeral"
         return text_response(
             f"🤖 Sultan Assistant is active on Cloudflare Python Workers!\n"
+            f"Phase: Phase 8 Technical Analysis & Risk Management Engine\n"
             f"Active Model: {settings.gemini_model}\n"
-            f"Access Mode: {'Enforcing Whitelist' if settings.is_private_mode_enabled else 'Locked (No Allowed Users Configured)'}\n"
-            f"Database: {'Connected (D1)' if db.is_available else 'Offline / Ephemeral'}\n"
-            f"Market Data: Connected (Binance Spot REST)\n\n"
+            f"Access Mode: {mode_str}\n"
+            f"Database: {db_str}\n"
+            f"Market Engine: Connected (Binance + Bybit + OKX + KuCoin)\n\n"
             "Endpoints:\n"
             "- GET /health       : System and configuration status\n"
             "- GET /set_webhook  : Register Telegram webhook\n"
@@ -181,6 +191,7 @@ async def on_fetch(request, env):
                 user_repo=user_repo,
                 memory_repo=memory_repo,
                 conversation_repo=conversation_repo,
+                watchlist_repo=watchlist_repo,
                 binance_client=binance_client
             )
             return json_response({"ok": True})

@@ -1,6 +1,6 @@
 # 🤖 Sultan Assistant (Cloudflare Python Worker)
 
-A modular, serverless, 24/7 private personal assistant and trading analysis platform powered by Google's **Gemini 3.1 Flash-Lite** model and **Cloudflare D1** persistent storage, engineered to run on the **Cloudflare Workers Free plan** (0 VPS, 0 long-running processes, 100% serverless Webhook architecture).
+A modular, serverless, 24/7 private personal trading-intelligence and education platform powered by Google's **Gemini 3.1 Flash-Lite** model, **Cloudflare D1** persistent storage, and a **High-Availability Multi-Exchange Market Engine**, engineered to run on the **Cloudflare Workers Free plan** (0 VPS, 0 long-running processes, 100% serverless Webhook architecture).
 
 ---
 
@@ -10,23 +10,56 @@ Sultan Assistant is built as a **strictly private personal assistant**:
 
 * **Fail-Closed Access Control:** The bot requires `ALLOWED_USER_IDS` to contain at least one valid Telegram user ID. If `ALLOWED_USER_IDS` is missing, empty, or invalid, the bot **denies access to all users** by default.
 * **Database & Quota Protection:** Unauthorized requests are rejected immediately at the router level and **never** trigger Google Gemini API calls, database writes, profile creation, or memory/history access.
-* **User Isolation:** All session history, user profiles, and long-term memory operations (`SELECT`, `INSERT`, `DELETE`) are strictly scoped by `telegram_user_id` taken from `message.from.id`.
-* **Secret Protection:** Webhook calls are validated via `X-Telegram-Bot-Api-Secret-Token`. Health endpoints (`/health`) expose only safe boolean readiness flags and never output secret values, database contents, session messages, or user IDs.
+* **User Isolation:** All session history, user profiles, watchlists, and long-term memory operations (`SELECT`, `INSERT`, `DELETE`) are strictly scoped by `telegram_user_id` taken from `message.from.id`.
+* **Zero Hallucination Policy:** Real-time market prices, candlestick data, and technical indicators are computed deterministically from verified live feeds (Binance, Bybit, OKX, KuCoin) with strict error sanitization. Gemini is never allowed to fabricate numerical market values.
 
 ---
 
 ## ✨ Features (خصوصیات)
-* 💬 **Smart Q&A with Session Continuity (گفتگو کا تسلسل):** Automatic multi-turn conversation history tracking within active sessions, allowing natural follow-ups and context-aware answers using **Gemini 3.1 Flash-Lite**.
-* 🧠 **Real Long-Term Memory (مستقل یادداشت):** Store, list, and delete custom facts, goals, and preferences using `/remember`, `/memories`, `/forget`, and `/forgetall`.
-* 🎯 **Dynamic Context Injection:** Injects relevant long-term memories and recent active conversation turns into Gemini prompts without requiring vector databases or embeddings.
-* 🗨️ **Session History View (`/history`):** View a human-readable summary of recent conversation turns in your current active session.
-* 🖼️ **Multimodal Image Vision (تصویر کا تجزیہ):** Send any photo with a prompt/caption to analyze, extract text, or explain its contents using multimodal native vision.
-* 💾 **Persistent State & Memory (Cloudflare D1):** User profiles, session history, and extensible memory storage that survive Worker restarts.
-* 🆔 **Identity Command (`/id`):** Instantly returns your Telegram numeric user ID directly from webhook metadata without querying Gemini.
-* 🩺 **Health & Setup Endpoints:**
-  * `GET /health` - Diagnostic endpoint to verify worker status, active model, private mode, database connectivity, and secret configurations without exposing secrets.
-  * `GET /set_webhook` - Automated 1-click webhook registration with Telegram.
-  * `POST /webhook` - Handles incoming Telegram webhook updates.
+
+* 📊 **Live Multi-Exchange Market Engine (لائیو مارکیٹ ریٹس):** Live spot prices (`/price`), 24h ticker metrics (`/ticker`), and top order-book depth (`/depth`) backed by a resilient waterfall (Binance cluster $\rightarrow$ Bybit $\rightarrow$ OKX $\rightarrow$ KuCoin).
+* 📈 **Deterministic Technical Analysis (`/ta`):** Instant multi-timeframe (`15m`, `1h`, `4h`, `1d`) technical calculations:
+  * **RSI-14:** Wilder-smoothed Relative Strength Index with overbought/oversold classification.
+  * **EMAs:** Trailing 20, 50, and 200 Exponential Moving Averages for trend direction and cross detection.
+  * **Bollinger Bands (20, 2σ):** Upper, middle, lower bands, and volatility bandwidth percentage.
+  * **ATR-14:** Average True Range volatility with recommended dynamic Stop-Loss buffers (1.5x ATR).
+  * **Support & Resistance:** Trailing price pivot extremes.
+* 🛡️ **Position Sizing & Risk Management (`/risk`):** Exact mathematical position sizing based on Capital Preservation First:
+  * Calculates maximum dollar risk budget, recommended quantity in coins and USD, and effective leverage.
+  * Generates structured Take-Profit targets based on Risk-to-Reward ratios (1:1.5, 1:2.0, 1:3.0 R:R).
+  * Enforces safety warnings against high-risk allocations (>3%) and dangerous leverage (>10x).
+* ⭐ **Personal Crypto Watchlist (`/watchlist`):** Add (`/watch <symbol>`) and remove (`/unwatch <symbol>`) favorite assets stored persistently in Cloudflare D1 with instant multi-asset live summaries.
+* 🧠 **Live Market-Grounded AI Intelligence:** Automatically detects crypto assets in natural language queries and injects verified live market context into Gemini prompts to eliminate LLM hallucinations.
+* 💬 **Smart Q&A with Session Continuity (گفتگو کا تسلسل):** Automatic multi-turn conversation history tracking within active sessions (`/history`, `/clear`).
+* 🧠 **Persistent Long-Term Memory (مستقل یادداشت):** Store, list, and delete custom facts, goals, and trading rules using `/remember`, `/memories`, `/forget`, and `/forgetall`.
+* 🖼️ **Multimodal Image Vision (تصویر کا تجزیہ):** Send any trading chart or photo with a caption to analyze structures or patterns.
+* 💾 **Persistent State & Memory (Cloudflare D1):** User profiles, session history, watchlists, and memories that survive Worker restarts.
+* 🆔 **Identity Command (`/id`):** Instantly returns your Telegram numeric user ID directly from webhook metadata.
+
+---
+
+## 📌 Available Bot Commands
+
+| Category | Command | Description | Example |
+| :--- | :--- | :--- | :--- |
+| **Market Data** | `/price <symbol>` | Live spot price with multi-exchange fallback | `/price BTCUSDT` or `/price SOL` |
+| **Market Data** | `/ticker <symbol>` | 24h high, low, volume, and percentage change | `/ticker ETHUSDT` |
+| **Market Data** | `/depth <symbol>` | Top 5 bids and asks order book depth | `/depth BTCUSDT` |
+| **Trading Intelligence** | `/ta <symbol> [tf]` | Technical indicators (RSI, EMA, BB, ATR, S/R) | `/ta BTCUSDT 1h` or `/ta SOL 4h` |
+| **Risk Management** | `/risk <cap> <r%> <e> <sl>` | Position sizing & 1:1.5, 1:2, 1:3 TP levels | `/risk 1000 2 65000 63500` |
+| **Watchlist** | `/watch <symbol>` | Add asset to personal D1 watchlist | `/watch SOL` |
+| **Watchlist** | `/unwatch <symbol>` | Remove asset from watchlist | `/unwatch SOL` |
+| **Watchlist** | `/watchlist` or `/wl` | View live prices of all watched assets | `/watchlist` |
+| **Memory** | `/remember <text>` | Save rule, goal, or preference to memory | `/remember Maximum risk per trade is 1.5%` |
+| **Memory** | `/memories` | List all stored long-term memories | `/memories` |
+| **Memory** | `/forget <num>` | Delete specific memory by number | `/forget 2` |
+| **Memory** | `/forgetall` | Clear all long-term memories | `/forgetall` (confirms with `/forgetall_confirm`) |
+| **Session** | `/history` | View recent turns in active session | `/history` |
+| **Session** | `/clear` or `/reset` | Start fresh session (preserves memories & watchlist) | `/clear` |
+| **System** | `/memory` | D1 database and storage connection status | `/memory` |
+| **System** | `/id` | View Telegram Numeric User ID | `/id` |
+| **System** | `/help` | Detailed command and usage guide | `/help` |
+| **System** | `/start` | Bot welcome message and overview | `/start` |
 
 ---
 
@@ -38,13 +71,13 @@ src/
 │
 ├── config/                      # Settings, constants, and prompts
 │   ├── __init__.py
-│   ├── settings.py              # Environment configuration & CONVERSATION_HISTORY_LIMIT = 20
-│   └── prompts.py               # Predefined copy, welcome text, and error templates
+│   ├── settings.py              # Environment configuration & limits
+│   └── prompts.py               # Predefined copy, welcome text, trading constitution
 │
 ├── storage/                     # Cloudflare D1 persistence layer
 │   ├── __init__.py
 │   ├── database.py              # D1 database async query client (Pyodide compatible)
-│   └── repositories.py          # Repositories for Users, Memories, Settings, and Conversation Sessions
+│   └── repositories.py          # Repositories for Users, Memories, Sessions, and Watchlists
 │
 ├── telegram/                    # Telegram API client & utilities
 │   ├── __init__.py
@@ -54,29 +87,21 @@ src/
 │
 ├── router/                      # Routing & dispatching
 │   ├── __init__.py
-│   ├── command_router.py        # /start, /help, /id, /memory, /history, /remember, /memories, /forget
-│   └── message_router.py        # Update dispatcher (commands, text, vision, auth, session history)
+│   ├── command_router.py        # Slash commands (/price, /ta, /risk, /watch, /watchlist, /memories...)
+│   └── message_router.py        # Update dispatcher (commands, vision, AI market grounding, sessions)
 │
-└── ai/                          # Gemini AI integration
+├── ai/                          # Gemini AI integration
+│   ├── __init__.py
+│   ├── gemini_client.py         # Google Gemini 3.1 Flash-Lite REST client
+│   └── prompts_builder.py       # Live market grounding, memory scoring & context separation
+│
+└── trading/                     # Market Data, Technical Analysis & Risk Management
     ├── __init__.py
-    ├── gemini_client.py         # Google Gemini 3.1 Flash-Lite REST client
-    └── prompts_builder.py       # JSON payload formatting, memory scoring & context separation
+    ├── models.py                # Data models (PriceTicker, Ticker24h, Depth, Candle, TA, Risk)
+    ├── binance_client.py        # Resilient multi-exchange REST client (Binance/Bybit/OKX/KuCoin)
+    ├── technical_analysis.py    # Pure-Python RSI-14, EMA 20/50/200, Bollinger Bands, ATR calculations
+    └── risk_calculator.py       # Deterministic position sizing and risk-to-reward targets
 ```
-
----
-
-## 📌 Available Bot Commands
-* `/remember <text>` - Explicitly save a goal, fact, preference, or instruction to long-term memory.
-* `/memories` - List all your stored long-term memories with numbered indexes.
-* `/forget <number>` - Delete a specific memory by its list number.
-* `/forgetall` - Request deletion of all stored long-term memories (requires `/forgetall_confirm`).
-* `/forgetall_confirm` - Permanently delete all stored long-term memories.
-* `/history` - View recent conversation turns in your current active session.
-* `/memory` - Check assistant memory, user profile, and D1 database state.
-* `/id` - View your Telegram numeric user ID.
-* `/start` - Welcome message and introduction.
-* `/help` - Usage instructions.
-* `/clear` or `/reset` - Start a fresh conversation session (does NOT delete long-term memories or profiles).
 
 ---
 
@@ -88,117 +113,25 @@ The database schema manages:
 3. `assistant_settings` — Persistent settings and active session tracking pointer.
 4. `conversation_sessions` — Active and historical conversation session records.
 5. `conversation_messages` — Recent turns (`user` and `assistant`) scoped by session and user.
+6. `user_watchlist` — Persistent tracked assets per user.
 
 ### To Apply Database Schema:
 
 ```bash
-# 1. Create the D1 Database (if not already created):
-npx wrangler d1 create sultan-assistant-db
-
-# 2. Execute the Migration Schema:
+# Execute the Migration Schema:
 npx wrangler d1 execute sultan-assistant-db --file=./schema.sql
 ```
 
-*(Note: If D1 is temporarily offline or unbound, Sultan Assistant gracefully degrades and processes single-turn Q&A without crashing).*
-
 ---
 
-## 📋 Prerequisites
-1. **Cloudflare Account:** Sign up for free at [dash.cloudflare.com](https://dash.cloudflare.com/).
-2. **Telegram Bot Token:** Create a bot with [@BotFather](https://t.me/BotFather) on Telegram and copy the token.
-3. **Gemini API Key:** Get a free API key from [Google AI Studio](https://aistudio.google.com/).
-4. **Your Telegram User ID:** Get your numeric Telegram ID (e.g. from [@userinfobot](https://t.me/userinfobot) or by sending `/id` once authorized).
-5. **Node.js / npm:** (Optional, if deploying via Wrangler CLI) Installed on your machine.
+## 🚀 Deployment Instructions
 
----
-
-## 🚀 Deployment Instructions (مرحلہ وار ڈپلائمنٹ)
-
-### Method 1: Deploy using Wrangler CLI (Recommended)
-
-#### 1. Clone the repository
+### Method 1: Deploy using Wrangler CLI
 ```bash
 git clone https://github.com/sb3791454-del/gemini-telegram-bot.git
 cd gemini-telegram-bot
-```
-
-#### 2. Login to Cloudflare
-```bash
-npx wrangler login
-```
-
-#### 3. Configure Worker Secrets
-Run the following commands to add your tokens securely to Cloudflare:
-```bash
-# Add Telegram Bot Token (from @BotFather)
-npx wrangler secret put TELEGRAM_BOT_TOKEN
-
-# Add Gemini API Key (from Google AI Studio)
-npx wrangler secret put GEMINI_API_KEY
-
-# Add your Telegram User ID (Required to grant access; comma-separated for multiple IDs)
-npx wrangler secret put ALLOWED_USER_IDS
-
-# (Optional) Add a custom Webhook Secret for extra security
-npx wrangler secret put WEBHOOK_SECRET
-
-# (Optional) Add a Setup Secret to protect the /set_webhook endpoint
-npx wrangler secret put SETUP_SECRET
-
-# (Optional) Override the default model (defaults to gemini-3.1-flash-lite)
-# npx wrangler secret put GEMINI_MODEL
-```
-
-#### 4. Configure D1 Database Binding in `wrangler.toml`
-Ensure `wrangler.toml` contains your D1 binding:
-```toml
-[[d1_databases]]
-binding = "ASSISTANT_DB"
-database_name = "sultan-assistant-db"
-database_id = "<your-d1-database-id>"
-```
-
-#### 5. Deploy the Worker
-```bash
 npx wrangler deploy
 ```
-Once deployed, Wrangler will output your worker URL (e.g., `https://gemini-telegram-bot.<your-subdomain>.workers.dev`).
 
-#### 6. Verify Health
-Visit your health endpoint in a web browser:
-```
-https://gemini-telegram-bot.<your-subdomain>.workers.dev/health
-```
-You should see a JSON response confirming `status: "ok"`, `private_mode: true`, `database_connected: true`, and that your secrets are configured.
-
-#### 7. Register Telegram Webhook (1-Click)
-Open the setup endpoint in your browser to automatically register your webhook with Telegram:
-```
-https://gemini-telegram-bot.<your-subdomain>.workers.dev/set_webhook
-```
-*(If you configured `SETUP_SECRET`, add `?secret=your_setup_secret` to the URL).*
-
-Telegram will return `{"ok": true, "result": true, "description": "Webhook was set"}`.
-
-Your bot is now live 24/7 on Cloudflare Workers! 🎉
-
----
-
-## 📁 Repository Structure
-```text
-.
-├── .env.example        # Reference environment variables & secret keys template
-├── .gitignore          # Git ignore rules for secrets and build artifacts
-├── README.md           # Documentation & deployment guide
-├── requirements.txt    # Python runtime requirements
-├── schema.sql          # Cloudflare D1 SQL schema migrations (Phase 2 & Phase 4)
-├── src/
-│   ├── __init__.py     # Core package marker
-│   ├── entry.py        # Cloudflare Python Worker lifecycle & HTTP router
-│   ├── config/         # Settings, prompts, and constants
-│   ├── storage/        # Cloudflare D1 client and data repositories (Users, Memories, Sessions)
-│   ├── telegram/       # Async Telegram API client, formatting, and authorization
-│   ├── router/         # Command and message dispatcher
-│   └── ai/             # Gemini 3.1 Flash-Lite REST integration & memory/history prompt builders
-└── wrangler.toml       # Cloudflare Worker configuration
-```
+#### Verification:
+Visit `https://gemini-telegram-bot.<your-subdomain>.workers.dev/health` to confirm system status.

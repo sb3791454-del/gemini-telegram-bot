@@ -1,18 +1,29 @@
-"""Main update and message dispatcher with strict deterministic command interception."""
+"""Main update and message dispatcher with strict deterministic command interception & AI market grounding."""
 
 import logging
+import asyncio
 from typing import Optional
 from config.settings import Settings
 from telegram.client import TelegramClient
 from telegram.auth import is_user_authorized
 from ai.gemini_client import GeminiClient
-from ai.prompts_builder import select_relevant_memories, format_prompt_with_context
+from ai.prompts_builder import (
+    select_relevant_memories,
+    extract_crypto_symbols,
+    format_prompt_with_context,
+)
 from router.command_router import handle_command
 from config.prompts import UNAUTHORIZED_DENIAL_TEXT, IMAGE_ERROR_TEXT, FALLBACK_ERROR_TEXT
-from storage.repositories import UserRepository, MemoryRepository, ConversationRepository
+from storage.repositories import (
+    UserRepository,
+    MemoryRepository,
+    ConversationRepository,
+    WatchlistRepository,
+)
 from trading.binance_client import BinanceClient
 
 logger = logging.getLogger("worker.router")
+
 
 async def dispatch_telegram_update(
     update: dict,
@@ -22,6 +33,7 @@ async def dispatch_telegram_update(
     user_repo: Optional[UserRepository] = None,
     memory_repo: Optional[MemoryRepository] = None,
     conversation_repo: Optional[ConversationRepository] = None,
+    watchlist_repo: Optional[WatchlistRepository] = None,
     binance_client: Optional[BinanceClient] = None,
 ):
     """Processes an incoming Telegram update dictionary."""
@@ -55,10 +67,9 @@ async def dispatch_telegram_update(
     caption = message.get("caption", "").strip()
 
     # 3. Check for Commands (Evaluated before any Gemini calls)
-    # Check leading slash or bot_command entity
     is_command = text.startswith("/")
     if not is_command and "entities" in message:
-        for ent in message.get("entities", []):
+        for ent in message["entities"]:
             if ent.get("type") == "bot_command" and ent.get("offset") == 0:
                 is_command = True
                 break
@@ -72,6 +83,7 @@ async def dispatch_telegram_update(
             user_repo=user_repo,
             memory_repo=memory_repo,
             conversation_repo=conversation_repo,
+            watchlist_repo=watchlist_repo,
             binance_client=binance_client
         )
         if handled:
@@ -87,7 +99,6 @@ async def dispatch_telegram_update(
             reply = await gemini_client.generate_vision(image_bytes, caption=caption, model_name=settings.gemini_model)
             await telegram_client.send_message(chat_id, reply, parse_mode="")
 
-            # Store lightweight textual turn in active session if DB available
             if conversation_repo and user_id and conversation_repo.db.is_available and reply != IMAGE_ERROR_TEXT:
                 try:
                     active_session = await conversation_repo.get_or_create_active_session(user_id)
@@ -102,13 +113,14 @@ async def dispatch_telegram_update(
             await telegram_client.send_message(chat_id, IMAGE_ERROR_TEXT, parse_mode="")
         return
 
-    # 5. Handle Ordinary Text Messages with Session History & Long-Term Memory Context
+    # 5. Handle Ordinary Text Messages with Session History, Long-Term Memory, and Live Market Grounding
     if text:
         await telegram_client.send_chat_action(chat_id, "typing")
         try:
             active_session_id = None
             recent_history = []
             relevant_memories = []
+            market_grounding_lines = []
 
             # Step 5a: Retrieve active session history from D1 (non-blocking / resilient)
             if conversation_repo and user_id and conversation_repo.db.is_available:
@@ -132,18 +144,37 @@ async def dispatch_telegram_update(
                 except Exception as e:
                     logger.error(f"Error selecting relevant memories: {e}")
 
-            # Step 5c: Format final prompt combining memories, conversation history, and user query
+            # Step 5c: Automated Live Market Grounding (Extract symbols and inject live data)
+            detected_symbols = extract_crypto_symbols(text, max_symbols=2)
+            if detected_symbols and binance_client:
+                for sym in detected_symbols:
+                    try:
+                        ticker_data = await binance_client.get_24h_ticker(sym)
+                        change_sign = "+" if ticker_data.price_change >= 0 else ""
+                        market_grounding_lines.append(
+                            f"Asset: {ticker_data.symbol} | Verified Price: ${ticker_data.last_price:,.2f} | "
+                            f"24h Change: {change_sign}{ticker_data.price_change_percent:.2f}% | "
+                            f"24h High: ${ticker_data.high_price:,.2f} | 24h Low: ${ticker_data.low_price:,.2f} | "
+                            f"Source: {ticker_data.source} (UTC: {ticker_data.timestamp})"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not ground symbol {sym}: {e}")
+
+            market_grounding_text = "\n".join(market_grounding_lines) if market_grounding_lines else None
+
+            # Step 5d: Format final prompt combining grounding, memories, history, and user query
             final_prompt = format_prompt_with_context(
                 user_query=text,
                 relevant_memories=relevant_memories,
-                conversation_history=recent_history
+                conversation_history=recent_history,
+                market_grounding_text=market_grounding_text
             )
 
-            # Step 5d: Execute single Gemini generation call
+            # Step 5e: Execute single Gemini generation call
             reply = await gemini_client.generate_text(final_prompt, model_name=settings.gemini_model)
             await telegram_client.send_message(chat_id, reply, parse_mode="")
 
-            # Step 5e: Persist user and assistant turns in D1 upon success
+            # Step 5f: Persist user and assistant turns in D1 upon success
             if (
                 conversation_repo
                 and user_id

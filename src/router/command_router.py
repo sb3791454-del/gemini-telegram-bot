@@ -2,14 +2,29 @@
 
 import re
 import logging
-from typing import Optional, Tuple
+import asyncio
+from typing import Optional, Tuple, List
 from telegram.client import TelegramClient
 from config.prompts import WELCOME_TEXT, HELP_TEXT, RESET_TEXT
-from storage.repositories import UserRepository, MemoryRepository, ConversationRepository, infer_memory_type
+from storage.repositories import (
+    UserRepository,
+    MemoryRepository,
+    ConversationRepository,
+    WatchlistRepository,
+    infer_memory_type,
+)
 from trading.binance_client import BinanceClient, BinanceAPIError
-from trading.models import PriceTicker, Ticker24h, OrderBookDepth
+from trading.models import (
+    PriceTicker,
+    Ticker24h,
+    OrderBookDepth,
+    TechnicalAnalysisSummary,
+    RiskCalculationResult,
+)
+from trading.risk_calculator import calculate_position_risk
 
 logger = logging.getLogger("worker.router.commands")
+
 
 def parse_command_and_args(raw_text: str) -> Tuple[Optional[str], str]:
     """
@@ -30,7 +45,6 @@ def parse_command_and_args(raw_text: str) -> Tuple[Optional[str], str]:
     if not trimmed.startswith("/"):
         return None, ""
     
-    # Match /cmd or /cmd@botname followed optionally by whitespace and arguments
     match = re.match(r"^/([a-zA-Z0-9_]+)(?:@[\w_]+)?(?:\s+(.*))?$", trimmed, re.DOTALL)
     if not match:
         return None, ""
@@ -39,6 +53,7 @@ def parse_command_and_args(raw_text: str) -> Tuple[Optional[str], str]:
     args = match.group(2).strip() if match.group(2) else ""
     return cmd_name, args
 
+
 def format_price_message(ticker: PriceTicker) -> str:
     price_val = ticker.price
     if price_val >= 1.0:
@@ -46,13 +61,14 @@ def format_price_message(ticker: PriceTicker) -> str:
     else:
         price_str = f"{price_val:.8f}".rstrip("0").rstrip(".")
         
-    source_name = getattr(ticker, 'source', 'Binance Spot')
+    source_name = getattr(ticker, "source", "Binance Spot")
     return (
         f"📊 *{ticker.symbol} Live Price*\n"
         f"• *Price:* `${price_str}`\n"
         f"• *Source:* {source_name} (Verified)\n"
         f"• *UTC Time:* `{ticker.timestamp}`"
     )
+
 
 def format_ticker_message(t: Ticker24h) -> str:
     change_sign = "+" if t.price_change >= 0 else ""
@@ -67,7 +83,7 @@ def format_ticker_message(t: Ticker24h) -> str:
         high_str = f"{t.high_price:.8f}".rstrip("0").rstrip(".")
         low_str = f"{t.low_price:.8f}".rstrip("0").rstrip(".")
         
-    source_name = getattr(t, 'source', 'Binance Spot')
+    source_name = getattr(t, "source", "Binance Spot")
     return (
         f"📈 *{t.symbol} 24h Ticker Summary*\n"
         f"• *Last Price:* `${price_str}`\n"
@@ -80,8 +96,9 @@ def format_ticker_message(t: Ticker24h) -> str:
         f"• *UTC Time:* `{t.timestamp}`"
     )
 
+
 def format_depth_message(d: OrderBookDepth) -> str:
-    source_name = getattr(d, 'source', 'Binance Order Book')
+    source_name = getattr(d, "source", "Binance Order Book")
     lines = [
         f"📖 *{d.symbol} Order Book Depth (Top 5)*\n"
         f"• *Best Bid:* `${d.best_bid:,.4f}`\n"
@@ -97,6 +114,61 @@ def format_depth_message(d: OrderBookDepth) -> str:
     lines.append(f"\n• *Source:* {source_name}\n• *UTC Time:* `{d.timestamp}`")
     return "\n".join(lines)
 
+
+def format_ta_message(ta: TechnicalAnalysisSummary) -> str:
+    lines = [
+        f"📊 *{ta.symbol} Technical Analysis ({ta.timeframe.upper()})*\n",
+        f"• *Current Price:* `${ta.current_price:,.2f}`",
+        f"• *Trend Structure:* *{ta.trend}*",
+        f"• *RSI (14):* `{ta.rsi_14:.1f}` — _{ta.rsi_condition}_\n",
+        "*Exponential Moving Averages:*",
+        f"  • *EMA 20:* `${ta.ema_20:,.2f}`",
+        f"  • *EMA 50:* `${ta.ema_50:,.2f}`",
+    ]
+    if ta.ema_200:
+        lines.append(f"  • *EMA 200:* `${ta.ema_200:,.2f}`")
+
+    lines.extend([
+        "\n*Bollinger Bands (20, 2σ):*",
+        f"  • *Upper:* `${ta.bb_upper:,.2f}`",
+        f"  • *Middle (SMA 20):* `${ta.bb_middle:,.2f}`",
+        f"  • *Lower:* `${ta.bb_lower:,.2f}`",
+        f"  • *Bandwidth:* `{ta.bb_bandwidth_pct:.2f}%`\n",
+        "*Volatility & Structure:*",
+        f"  • *ATR (14):* `${ta.atr_14:,.2f}`",
+        f"  • *Recommended SL Buffer (1.5x ATR):* `${ta.suggested_sl_distance:,.2f}`",
+        f"  • *Key Resistance (Lookback):* `${ta.resistance_level:,.2f}`",
+        f"  • *Key Support (Lookback):* `${ta.support_level:,.2f}`\n",
+        f"• *Source:* {ta.source}\n• *UTC Time:* `{ta.timestamp}`"
+    ])
+    return "\n".join(lines)
+
+
+def format_risk_message(r: RiskCalculationResult) -> str:
+    lines = [
+        "🛡️ *Position Sizing & Risk Management Breakdown*\n",
+        f"• *Trade Direction:* *{r.direction}*",
+        f"• *Account Capital:* `${r.capital:,.2f}`",
+        f"• *Max Risk Budget:* `{r.risk_pct:.1f}%` (`${r.risk_usd:,.2f}`)",
+        f"• *Entry Price:* `${r.entry_price:,.4f}`",
+        f"• *Stop-Loss Price:* `${r.stop_loss_price:,.4f}` (`{r.price_risk_pct:.2f}%` price risk)\n",
+        "*Recommended Execution Sizing:*",
+        f"• *Position Size (Coins):* `{r.position_size_coins:,.4f}`",
+        f"• *Total Position Value:* `${r.position_value_usd:,.2f}`",
+        f"• *Effective Leverage:* `{r.effective_leverage:.2f}x`\n",
+        "*Take-Profit Target Levels (R:R Ratio):*",
+        f"• 🎯 *TP1 (1:1.5 R:R):* `${r.tp1_price:,.4f}` (+${1.5 * r.risk_usd:,.2f})",
+        f"• 🎯 *TP2 (1:2.0 R:R):* `${r.tp2_price:,.4f}` (+${2.0 * r.risk_usd:,.2f})",
+        f"• 🎯 *TP3 (1:3.0 R:R):* `${r.tp3_price:,.4f}` (+${3.0 * r.risk_usd:,.2f})"
+    ]
+    if r.warnings:
+        lines.append("\n*انتباہات (Safety Warnings):*")
+        for w in r.warnings:
+            lines.append(f"• {w}")
+
+    return "\n".join(lines)
+
+
 async def handle_command(
     command_text: str,
     chat_id: int,
@@ -105,16 +177,12 @@ async def handle_command(
     user_repo: Optional[UserRepository] = None,
     memory_repo: Optional[MemoryRepository] = None,
     conversation_repo: Optional[ConversationRepository] = None,
+    watchlist_repo: Optional[WatchlistRepository] = None,
     binance_client: Optional[BinanceClient] = None,
 ) -> bool:
     """
     Evaluates slash commands.
     Returns True if the message was recognized and handled as a command, False otherwise.
-    
-    CRITICAL SAFETY RULE:
-    Once recognized as a deterministic command (such as /price, /ticker, /depth),
-    the handler will NEVER return False or allow silent fallback into Gemini,
-    even if an error or exception occurs.
     """
     cmd, args = parse_command_and_args(command_text)
     if not cmd:
@@ -174,7 +242,7 @@ async def handle_command(
             await telegram_client.send_message(chat_id, "⚠️ گفتگو لانے میں مسئلہ پیش آیا۔", parse_mode="")
         return True
 
-    # --- 3. DETERMINISTIC MARKET DATA COMMANDS (PHASE 7) ---
+    # --- 3. DETERMINISTIC MARKET DATA COMMANDS ---
     
     # 3a. /price <symbol>
     if cmd == "/price":
@@ -193,7 +261,7 @@ async def handle_command(
         if not binance_client:
             await telegram_client.send_message(
                 chat_id,
-                "⚠️ *Market Data Error:*\nمارکیٹ ڈیٹا کلائنٹ دستیاب نہیں ہے۔ (Binance client uninitialized)",
+                "⚠️ *Market Data Error:*\nمارکیٹ ڈیٹا کلائنٹ دستیاب نہیں ہے۔ (Client uninitialized)",
                 parse_mode="Markdown"
             )
             return True
@@ -210,7 +278,7 @@ async def handle_command(
                 parse_mode="Markdown"
             )
         except BinanceAPIError as be:
-            logger.error(f"Binance price error: {be}")
+            logger.error(f"Price error: {be}")
             await telegram_client.send_message(
                 chat_id,
                 f"⚠️ *Market Data Error:*\n{str(be)}\n\n_No market value or analysis will be guessed._",
@@ -225,7 +293,102 @@ async def handle_command(
             )
         return True
 
-    # 3b. /ticker <symbol>
+    # 3b. /ta or /analyze <symbol> [timeframe] (PHASE 8)
+    if cmd in ("/ta", "/analyze"):
+        if not args:
+            msg = (
+                "ℹ️ *درست طریقہ استعمال (Usage):*\n"
+                "`/ta <symbol> [15m|1h|4h|1d]`\n\n"
+                "*مثالیں (Examples):*\n"
+                "• `/ta BTCUSDT 1h` (1 گھنٹے کا اینالیسس)\n"
+                "• `/ta SOL 4h` (4 گھنٹے کا اینالیسس)\n"
+                "• `/ta ETH` (بائی ڈیفالٹ 1h لے گا)"
+            )
+            await telegram_client.send_message(chat_id, msg, parse_mode="Markdown")
+            return True
+
+        if not binance_client:
+            await telegram_client.send_message(
+                chat_id,
+                "⚠️ *Technical Analysis Error:*\nمارکیٹ ڈیٹا کلائنٹ دستیاب نہیں ہے۔",
+                parse_mode="Markdown"
+            )
+            return True
+
+        parts = args.split()
+        symbol_raw = parts[0]
+        timeframe = parts[1].lower() if len(parts) > 1 else "1h"
+        if timeframe not in ("15m", "1h", "4h", "1d", "1w"):
+            timeframe = "1h"
+
+        try:
+            ta_summary = await binance_client.get_technical_analysis(symbol_raw, timeframe=timeframe)
+            resp = format_ta_message(ta_summary)
+            await telegram_client.send_message(chat_id, resp, parse_mode="Markdown")
+        except ValueError as ve:
+            await telegram_client.send_message(
+                chat_id,
+                f"⚠️ *غلط سمبل:* {str(ve)}",
+                parse_mode="Markdown"
+            )
+        except BinanceAPIError as be:
+            logger.error(f"TA error: {be}")
+            await telegram_client.send_message(
+                chat_id,
+                f"⚠️ *Technical Analysis Error:*\n{str(be)}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error in /ta: {e}")
+            await telegram_client.send_message(
+                chat_id,
+                "⚠️ *Technical Analysis Error:*\nٹیکنیکل انڈیکیٹرز لانے میں مسئلہ پیش آیا۔",
+                parse_mode="Markdown"
+            )
+        return True
+
+    # 3c. /risk or /calc <capital> <risk%> <entry> <stop_loss> (PHASE 8)
+    if cmd in ("/risk", "/calc"):
+        parts = args.split()
+        if len(parts) < 4:
+            msg = (
+                "ℹ️ *رسک مینجمنٹ کیلکولیٹر (Risk Calculator Usage):*\n"
+                "`/risk <Capital> <Risk%> <EntryPrice> <StopLoss>`\n\n"
+                "*مثال (Example - Long Position):*\n"
+                "`/risk 1000 2 65000 63500`\n"
+                "_(کیپٹل: $1,000 | رسک: 2% ($20) | انٹری: $65,000 | سٹاپ لاس: $63,500)_\n\n"
+                "*مثال (Example - Short Position):*\n"
+                "`/risk 500 1.5 150 156`\n"
+                "_(کیپٹل: $500 | رسک: 1.5% | انٹری: $150 | سٹاپ لاس: $156)_"
+            )
+            await telegram_client.send_message(chat_id, msg, parse_mode="Markdown")
+            return True
+
+        try:
+            capital_val = float(parts[0])
+            risk_pct_val = float(parts[1])
+            entry_val = float(parts[2])
+            sl_val = float(parts[3])
+
+            risk_res = calculate_position_risk(capital_val, risk_pct_val, entry_val, sl_val)
+            resp = format_risk_message(risk_res)
+            await telegram_client.send_message(chat_id, resp, parse_mode="Markdown")
+        except ValueError as ve:
+            await telegram_client.send_message(
+                chat_id,
+                f"⚠️ *کیلکولیشن ایرر (Calculation Error):*\n{str(ve)}\n\n_طریقہ:_ `/risk 1000 2 65000 63500`",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error in /risk: {e}")
+            await telegram_client.send_message(
+                chat_id,
+                "⚠️ رسک کیلکولیشن پروسیس کرنے میں مسئلہ پیش آیا۔",
+                parse_mode=""
+            )
+        return True
+
+    # 3d. /ticker <symbol>
     if cmd == "/ticker":
         if not args:
             msg = (
@@ -273,7 +436,7 @@ async def handle_command(
             )
         return True
 
-    # 3c. /depth <symbol>
+    # 3e. /depth <symbol>
     if cmd == "/depth":
         if not args:
             msg = (
@@ -321,7 +484,104 @@ async def handle_command(
             )
         return True
 
-    # --- 4. LONG-TERM MEMORY COMMANDS ---
+    # --- 4. WATCHLIST COMMANDS (PHASE 8) ---
+    if cmd == "/watch":
+        if not args:
+            msg = (
+                "ℹ️ *واچ لسٹ میں شامل کرنے کا طریقہ:*\n"
+                "`/watch <symbol>`\n\n"
+                "*مثالیں:* `/watch BTC`, `/watch SOLUSDT`, `/watch ETH`"
+            )
+            await telegram_client.send_message(chat_id, msg, parse_mode="Markdown")
+            return True
+
+        if not watchlist_repo or not watchlist_repo.db.is_available or not user_id:
+            await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔", parse_mode="")
+            return True
+
+        try:
+            sym_raw = args.split()[0]
+            normalized = BinanceClient.normalize_symbol(sym_raw) if binance_client else sym_raw.upper()
+            success = await watchlist_repo.add_to_watchlist(user_id, normalized)
+            if success:
+                resp = f"⭐ *واچ لسٹ میں شامل ہو گیا (Watchlist Added):* `{normalized}`\n\n_واچ لسٹ دیکھنے کے لیے `/watchlist` استعمال کریں۔_"
+                await telegram_client.send_message(chat_id, resp, parse_mode="Markdown")
+            else:
+                await telegram_client.send_message(chat_id, "⚠️ واچ لسٹ میں محفوظ کرنے میں مسئلہ پیش آیا۔", parse_mode="")
+        except Exception as e:
+            logger.error(f"Error in /watch: {e}")
+            await telegram_client.send_message(chat_id, "⚠️ واچ لسٹ اپ ڈیٹ میں مسئلہ پیش آیا۔", parse_mode="")
+        return True
+
+    if cmd == "/unwatch":
+        if not args:
+            msg = (
+                "ℹ️ *واچ لسٹ سے نکالنے کا طریقہ:*\n"
+                "`/unwatch <symbol>`\n\n"
+                "*مثالیں:* `/unwatch SOL`, `/unwatch BTCUSDT`"
+            )
+            await telegram_client.send_message(chat_id, msg, parse_mode="Markdown")
+            return True
+
+        if not watchlist_repo or not watchlist_repo.db.is_available or not user_id:
+            await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔", parse_mode="")
+            return True
+
+        try:
+            sym_raw = args.split()[0]
+            normalized = BinanceClient.normalize_symbol(sym_raw) if binance_client else sym_raw.upper()
+            await watchlist_repo.remove_from_watchlist(user_id, normalized)
+            resp = f"🗑️ *واچ لسٹ سے ہٹا دیا گیا (Removed from Watchlist):* `{normalized}`"
+            await telegram_client.send_message(chat_id, resp, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error in /unwatch: {e}")
+            await telegram_client.send_message(chat_id, "⚠️ واچ لسٹ اپ ڈیٹ میں مسئلہ پیش آیا۔", parse_mode="")
+        return True
+
+    if cmd in ("/watchlist", "/wl"):
+        if not watchlist_repo or not watchlist_repo.db.is_available or not user_id:
+            await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔", parse_mode="")
+            return True
+
+        try:
+            items = await watchlist_repo.get_watchlist(user_id)
+            if not items:
+                msg = (
+                    "⭐ *آپ کی واچ لسٹ خالی ہے (Watchlist Empty)*\n\n"
+                    "کوئی بھی کوائن شامل کرنے کے لیے `/watch <symbol>` لکھیں (مثلاً: `/watch BTC` یا `/watch SOL`)۔"
+                )
+                await telegram_client.send_message(chat_id, msg, parse_mode="Markdown")
+                return True
+
+            lines = ["⭐ *آپ کی واچ لسٹ (Personal Crypto Watchlist):*\n"]
+            for idx, itm in enumerate(items, start=1):
+                sym = itm.get("symbol", "")
+                price_str = "N/A"
+                change_str = ""
+                if binance_client:
+                    try:
+                        t = await binance_client.get_24h_ticker(sym)
+                        p_val = t.last_price
+                        if p_val >= 1.0:
+                            price_str = f"${p_val:,.2f}" if p_val >= 100 else f"${p_val:,.4f}"
+                        else:
+                            price_str = f"${p_val:.6f}".rstrip("0").rstrip(".")
+                        change_sign = "+" if t.price_change >= 0 else ""
+                        change_emoji = "🟢" if t.price_change >= 0 else "🔴"
+                        change_str = f" {change_emoji} `{change_sign}{t.price_change_percent:.2f}%`"
+                    except Exception:
+                        pass
+
+                lines.append(f"{idx}. *{sym}:* `{price_str}`{change_str}")
+
+            lines.append("\n_مزید کوائن شامل کرنے کے لیے `/watch <symbol>` اور ہٹانے کے لیے `/unwatch <symbol>` استعمال کریں۔_")
+            await telegram_client.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error in /watchlist: {e}")
+            await telegram_client.send_message(chat_id, "⚠️ واچ لسٹ لانے میں مسئلہ پیش آیا۔", parse_mode="")
+        return True
+
+    # --- 5. LONG-TERM MEMORY COMMANDS ---
     if cmd == "/remember":
         content = args.strip()
         if not content:
@@ -434,6 +694,7 @@ async def handle_command(
                 profile = await user_repo.get_user_profile(user_id) if user_id else None
                 mem_count = await memory_repo.get_memory_count(user_id) if (memory_repo and user_id) else 0
                 msg_count = await conversation_repo.get_total_message_count(user_id) if (conversation_repo and user_id) else 0
+                wl_count = await watchlist_repo.get_watchlist_count(user_id) if (watchlist_repo and user_id) else 0
                 
                 resp_text = (
                     f"🧠 *اسٹیٹس اور یادداشت (State & Memory Status)*\n\n"
@@ -441,8 +702,9 @@ async def handle_command(
                     f"• *صارف کا نام:* {profile.get('display_name') if profile else 'N/A'}\n"
                     f"• *Telegram ID:* `{user_id}`\n"
                     f"• *محفوظ شدہ یادداشتیں (Memories):* `{mem_count}`\n"
+                    f"• *واچ لسٹ کوائنز (Watchlist):* `{wl_count}`\n"
                     f"• *کل پیغامات (Total Messages):* `{msg_count}`\n\n"
-                    f"_یادداشتیں دیکھنے کے لیے `/memories` استعمال کریں۔_"
+                    f"_یادداشتیں دیکھنے کے لیے `/memories` اور واچ لسٹ کے لیے `/watchlist` استعمال کریں۔_"
                 )
             except Exception as e:
                 logger.error(f"Error fetching memory status: {e}")

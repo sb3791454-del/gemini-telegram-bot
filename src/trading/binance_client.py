@@ -8,7 +8,13 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple
-from trading.models import PriceTicker, Ticker24h, OrderBookDepth
+from trading.models import (
+    PriceTicker,
+    Ticker24h,
+    OrderBookDepth,
+    Candle,
+    TechnicalAnalysisSummary,
+)
 
 logger = logging.getLogger("worker.trading.market")
 
@@ -544,3 +550,149 @@ class BinanceClient:
         if isinstance(last_error, BinanceAPIError):
             raise last_error
         raise BinanceAPIError("Failed to retrieve order book depth from exchange feeds.")
+
+    async def get_klines(self, symbol: str, interval: str = "1h", limit: int = 50) -> List[Candle]:
+        """Fetches historical OHLCV candlestick data with multi-exchange fallback."""
+        norm_symbol = self.normalize_symbol(symbol)
+        valid_intervals = ("15m", "1h", "4h", "1d", "1w")
+        if interval not in valid_intervals:
+            interval = "1h"
+        limit = max(10, min(100, limit))
+
+        # Special handling for USDT
+        if norm_symbol == "USDT":
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            candles = []
+            for i in range(limit):
+                t = now_ts - (limit - i) * 3600
+                candles.append(Candle(
+                    open_time=t * 1000,
+                    open=1.0,
+                    high=1.0005,
+                    low=0.9995,
+                    close=1.0,
+                    volume=1000000.0,
+                    close_time=(t + 3600) * 1000 - 1
+                ))
+            return candles
+
+        last_error = None
+
+        # 1. Try Binance endpoints cluster
+        for base in BINANCE_HOSTS:
+            url = f"{base}/api/v3/klines?symbol={norm_symbol}&interval={interval}&limit={limit}"
+            try:
+                resp = await self._safe_fetch(url)
+                status = getattr(resp, "status", 200)
+                resp_text = await resp.text()
+
+                if status == 200:
+                    try:
+                        raw_data = json.loads(resp_text)
+                    except Exception:
+                        raise BinanceAPIError("Malformed response received from Binance klines API.")
+
+                    if isinstance(raw_data, list) and len(raw_data) > 0:
+                        candles = []
+                        for k in raw_data:
+                            candles.append(Candle(
+                                open_time=int(k[0]),
+                                open=float(k[1]),
+                                high=float(k[2]),
+                                low=float(k[3]),
+                                close=float(k[4]),
+                                volume=float(k[5]),
+                                close_time=int(k[6])
+                            ))
+                        return candles
+                elif status >= 400:
+                    try:
+                        handle_binance_error_response(status, resp_text)
+                    except BinanceAPIError as be:
+                        last_error = be
+                        if status in (400, 429, 418):
+                            raise
+            except BinanceAPIError as be:
+                last_error = be
+                if be.status_code in (400, 429, 418):
+                    raise
+            except Exception as e:
+                logger.warning(f"Binance host {base} klines failed: {e}")
+                last_error = e
+
+        # 2. Fallback: Bybit Spot Klines
+        try:
+            bybit_intervals = {"15m": "15", "1h": "60", "4h": "240", "1d": "D", "1w": "W"}
+            b_int = bybit_intervals.get(interval, "60")
+            bybit_url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={norm_symbol}&interval={b_int}&limit={limit}"
+            resp = await self._safe_fetch(bybit_url)
+            if getattr(resp, "status", 200) == 200:
+                data = json.loads(await resp.text())
+                if data.get("retCode") == 0 and "result" in data:
+                    raw_list = data["result"].get("list", [])
+                    if raw_list:
+                        candles = []
+                        for k in reversed(raw_list):
+                            candles.append(Candle(
+                                open_time=int(k[0]),
+                                open=float(k[1]),
+                                high=float(k[2]),
+                                low=float(k[3]),
+                                close=float(k[4]),
+                                volume=float(k[5]),
+                                close_time=int(k[0]) + 3600000 - 1
+                            ))
+                        return candles
+        except Exception as e:
+            logger.warning(f"Bybit klines fallback failed: {e}")
+
+        # 3. Fallback: OKX Spot Candles
+        try:
+            base_coin, quote_coin = self._split_base_quote(norm_symbol)
+            okx_inst = f"{base_coin}-{quote_coin}"
+            okx_bars = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
+            o_bar = okx_bars.get(interval, "1H")
+            okx_url = f"https://www.okx.com/api/v5/market/candles?instId={okx_inst}&bar={o_bar}&limit={limit}"
+            resp = await self._safe_fetch(okx_url)
+            if getattr(resp, "status", 200) == 200:
+                data = json.loads(await resp.text())
+                if data.get("code") == "0" and data.get("data"):
+                    raw_list = data["data"]
+                    candles = []
+                    for k in reversed(raw_list):
+                        candles.append(Candle(
+                            open_time=int(k[0]),
+                            open=float(k[1]),
+                            high=float(k[2]),
+                            low=float(k[3]),
+                            close=float(k[4]),
+                            volume=float(k[5]),
+                            close_time=int(k[0]) + 3600000 - 1
+                        ))
+                    return candles
+        except Exception as e:
+            logger.warning(f"OKX klines fallback failed: {e}")
+
+        if isinstance(last_error, BinanceAPIError):
+            raise last_error
+        raise BinanceAPIError("Failed to retrieve candlestick data from exchange feeds.")
+
+    async def get_technical_analysis(self, symbol: str, timeframe: str = "1h") -> TechnicalAnalysisSummary:
+        """Fetches candlesticks and computes full mathematical technical indicator suite."""
+        norm_symbol = self.normalize_symbol(symbol)
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        from trading.technical_analysis import evaluate_market_structure
+
+        candles = await self.get_klines(norm_symbol, interval=timeframe, limit=50)
+        if not candles:
+            raise BinanceAPIError(f"No candlestick data available for {norm_symbol}.")
+
+        source_name = "Binance Klines"
+        return evaluate_market_structure(
+            norm_symbol,
+            timeframe,
+            candles,
+            now_iso,
+            source=source_name
+        )

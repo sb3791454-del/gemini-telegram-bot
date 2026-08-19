@@ -1,4 +1,4 @@
-"""Storage and persistence package for Sultan Assistant."""
+"""Persistence and memory package for Sultan Assistant."""
 
 from storage.database import D1Database
 from storage.repositories import (
@@ -6,6 +6,8 @@ from storage.repositories import (
     MemoryRepository,
     SettingsRepository,
     ConversationRepository,
+    WatchlistRepository,
+    infer_memory_type,
 )
 
 __all__ = [
@@ -14,4 +16,6 @@ __all__ = [
     "MemoryRepository",
     "SettingsRepository",
     "ConversationRepository",
+    "WatchlistRepository",
+    "infer_memory_type",
 ]
