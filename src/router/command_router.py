@@ -46,10 +46,11 @@ def format_price_message(ticker: PriceTicker) -> str:
     else:
         price_str = f"{price_val:.8f}".rstrip("0").rstrip(".")
         
+    source_name = getattr(ticker, 'source', 'Binance Spot')
     return (
         f"📊 *{ticker.symbol} Live Price*\n"
         f"• *Price:* `${price_str}`\n"
-        f"• *Source:* Binance Spot (Verified)\n"
+        f"• *Source:* {source_name} (Verified)\n"
         f"• *UTC Time:* `{ticker.timestamp}`"
     )
 
@@ -66,6 +67,7 @@ def format_ticker_message(t: Ticker24h) -> str:
         high_str = f"{t.high_price:.8f}".rstrip("0").rstrip(".")
         low_str = f"{t.low_price:.8f}".rstrip("0").rstrip(".")
         
+    source_name = getattr(t, 'source', 'Binance Spot')
     return (
         f"📈 *{t.symbol} 24h Ticker Summary*\n"
         f"• *Last Price:* `${price_str}`\n"
@@ -74,11 +76,12 @@ def format_ticker_message(t: Ticker24h) -> str:
         f"• *24h Low:* `${low_str}`\n"
         f"• *24h Base Volume:* `{t.volume:,.2f}`\n"
         f"• *24h Quote Volume:* `${t.quote_volume:,.2f} USDT`\n"
-        f"• *Source:* Binance Spot (Verified)\n"
+        f"• *Source:* {source_name} (Verified)\n"
         f"• *UTC Time:* `{t.timestamp}`"
     )
 
 def format_depth_message(d: OrderBookDepth) -> str:
+    source_name = getattr(d, 'source', 'Binance Order Book')
     lines = [
         f"📖 *{d.symbol} Order Book Depth (Top 5)*\n"
         f"• *Best Bid:* `${d.best_bid:,.4f}`\n"
@@ -91,7 +94,7 @@ def format_depth_message(d: OrderBookDepth) -> str:
     lines.append("\n*Bids (Buyers):*")
     for p, q in d.bids:
         lines.append(f"  🟢 `${p:,.4f}` — `{q:,.4f}`")
-    lines.append(f"\n• *Source:* Binance Order Book\n• *UTC Time:* `{d.timestamp}`")
+    lines.append(f"\n• *Source:* {source_name}\n• *UTC Time:* `{d.timestamp}`")
     return "\n".join(lines)
 
 async def handle_command(

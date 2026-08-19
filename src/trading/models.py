@@ -1,16 +1,19 @@
-"""Normalized market data models for Sultan Assistant trading engine."""
+"""Data models for cryptocurrency market data and trading intelligence."""
 
 from dataclasses import dataclass
 from typing import List, Tuple
 
-@dataclass(frozen=True)
+@dataclass
 class PriceTicker:
+    """Normalized spot price response."""
     symbol: str
     price: float
     timestamp: str
+    source: str = "Binance Spot"
 
-@dataclass(frozen=True)
+@dataclass
 class Ticker24h:
+    """24-hour rolling price statistics."""
     symbol: str
     last_price: float
     price_change: float
@@ -20,9 +23,11 @@ class Ticker24h:
     volume: float
     quote_volume: float
     timestamp: str
+    source: str = "Binance Spot"
 
-@dataclass(frozen=True)
+@dataclass
 class OrderBookDepth:
+    """Order book depth (bids and asks)."""
     symbol: str
     bids: List[Tuple[float, float]]
     asks: List[Tuple[float, float]]
@@ -31,3 +36,4 @@ class OrderBookDepth:
     spread: float
     spread_percentage: float
     timestamp: str
+    source: str = "Binance Order Book"
