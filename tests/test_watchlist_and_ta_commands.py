@@ -182,6 +182,75 @@ class TestPhase8Commands(unittest.TestCase):
         self.assertIn("Bollinger Bands", msg)
         self.assertIn("ATR (14)", msg)
 
+    def test_memory_crud_and_status_commands(self):
+        mem_storage = []
+        class MockFullD1Binding:
+            def prepare(self, sql):
+                class Stmt:
+                    def __init__(self, s):
+                        self.s = s
+                        self.params = []
+                    def bind(self, *params):
+                        self.params = list(params)
+                        return self
+                    async def run(self):
+                        if "INSERT INTO conversation_memories" in self.s:
+                            uid, mtype, content, now, _ = self.params
+                            mem_storage.append({"id": len(mem_storage) + 1, "telegram_user_id": uid, "memory_type": mtype, "content": content})
+                        elif "DELETE FROM conversation_memories" in self.s:
+                            mid, uid = self.params
+                            mem_storage[:] = [m for m in mem_storage if not (m["telegram_user_id"] == uid and m["id"] == mid)]
+                        return {"meta": {"changes": 1}}
+                    async def first(self):
+                        if "SELECT COUNT(*)" in self.s and "conversation_memories" in self.s:
+                            return {"count": len(mem_storage)}
+                        if "SELECT COUNT(*)" in self.s and "user_watchlist" in self.s:
+                            return {"count": 1}
+                        if "SELECT COUNT(*)" in self.s and "conversation_messages" in self.s:
+                            return {"count": 5}
+                        if "SELECT * FROM user_profiles" in self.s:
+                            return {"display_name": "Abdul"}
+                        if "LOWER(TRIM(content))" in self.s:
+                            return None
+                        return None
+                    async def all(self):
+                        if "conversation_memories" in self.s:
+                            return SimpleNamespace(results=list(mem_storage))
+                        return SimpleNamespace(results=[])
+                return Stmt(sql)
+
+        full_db = D1Database(MockFullD1Binding())
+        user_repo = UserRepository(full_db)
+        mem_repo = MemoryRepository(full_db)
+        conv_repo = ConversationRepository(full_db)
+
+        # 1. /remember
+        self.loop.run_until_complete(
+            handle_command("/remember Always risk max 1%", 100, self.tg, user_id=8116631925, memory_repo=mem_repo)
+        )
+        self.assertIn("Memory Saved", self.tg.sent[-1]["text"])
+        self.assertEqual(len(mem_storage), 1)
+
+        # 2. /memories
+        self.loop.run_until_complete(
+            handle_command("/memories", 100, self.tg, user_id=8116631925, memory_repo=mem_repo)
+        )
+        self.assertIn("Always risk max 1%", self.tg.sent[-1]["text"])
+
+        # 3. /forget 1
+        self.loop.run_until_complete(
+            handle_command("/forget 1", 100, self.tg, user_id=8116631925, memory_repo=mem_repo)
+        )
+        self.assertIn("Memory #1 Deleted", self.tg.sent[-1]["text"])
+        self.assertEqual(len(mem_storage), 0)
+
+        # 4. /memory status
+        self.loop.run_until_complete(
+            handle_command("/memory", 100, self.tg, user_id=8116631925, user_repo=user_repo, memory_repo=mem_repo, conversation_repo=conv_repo, watchlist_repo=self.wl_repo)
+        )
+        self.assertIn("State & Memory Status", self.tg.sent[-1]["text"])
+        self.assertIn("واچ لسٹ کوائنز", self.tg.sent[-1]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

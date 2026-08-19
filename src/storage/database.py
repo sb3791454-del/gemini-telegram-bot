@@ -60,10 +60,21 @@ class D1Database:
             res = await stmt.all()
             if res is None:
                 return []
-            results = getattr(res, "results", res)
+            if isinstance(res, dict) and "results" in res:
+                results = res["results"]
+            else:
+                results = getattr(res, "results", res)
             if hasattr(results, "to_py"):
                 results = results.to_py()
-            return [dict(r) for r in results]
+            out = []
+            for r in results:
+                if hasattr(r, "to_py"):
+                    out.append(dict(r.to_py()))
+                elif isinstance(r, dict):
+                    out.append(r)
+                else:
+                    out.append(dict(r))
+            return out
         except Exception as e:
             logger.error(f"D1 fetch_all error: {e}")
             return []

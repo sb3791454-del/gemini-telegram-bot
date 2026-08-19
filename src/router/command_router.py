@@ -1,11 +1,13 @@
-"""Command router for Telegram bot slash commands with deterministic execution."""
+"""Main entrypoint for slash commands routing, formatting, and dispatching."""
 
-import re
+import json
 import logging
-import asyncio
-from typing import Optional, Tuple, List
-from telegram.client import TelegramClient
-from config.prompts import WELCOME_TEXT, HELP_TEXT, RESET_TEXT
+from typing import Optional, Dict, Any, List, Tuple
+from config.prompts import (
+    WELCOME_TEXT,
+    HELP_TEXT,
+    RESET_TEXT,
+)
 from storage.repositories import (
     UserRepository,
     MemoryRepository,
@@ -22,96 +24,87 @@ from trading.models import (
     RiskCalculationResult,
 )
 from trading.risk_calculator import calculate_position_risk
+from telegram.client import TelegramClient
 
-logger = logging.getLogger("worker.router.commands")
+logger = logging.getLogger("worker.router.command")
 
 
-def parse_command_and_args(raw_text: str) -> Tuple[Optional[str], str]:
+def parse_command_and_args(text: str) -> Tuple[Optional[str], str]:
     """
-    Robustly parses command and arguments from raw message text.
-    Handles:
-    - /price BTCUSDT
-    - /price btcusdt
-    - /price@BOT_USERNAME BTCUSDT
-    - Leading/trailing whitespace and multiple spaces
-    
-    Returns (command_name_lower, argument_string_stripped).
-    e.g. '/price@sultan_bot  BTCUSDT ' -> ('/price', 'BTCUSDT')
+    Parses incoming message text into a canonical lowercase command and raw argument string.
+    Handles bot username suffixes (e.g., /price@SultanBot BTC -> /price, BTC).
     """
-    if not raw_text:
+    if not text or not text.startswith("/"):
         return None, ""
-    
-    trimmed = raw_text.strip()
-    if not trimmed.startswith("/"):
-        return None, ""
-    
-    match = re.match(r"^/([a-zA-Z0-9_]+)(?:@[\w_]+)?(?:\s+(.*))?$", trimmed, re.DOTALL)
-    if not match:
-        return None, ""
-    
-    cmd_name = "/" + match.group(1).lower()
-    args = match.group(2).strip() if match.group(2) else ""
-    return cmd_name, args
+
+    parts = text.strip().split(maxsplit=1)
+    raw_cmd = parts[0]
+    args = parts[1].strip() if len(parts) > 1 else ""
+
+    # Strip @botname suffix if present
+    if "@" in raw_cmd:
+        raw_cmd = raw_cmd.split("@")[0]
+
+    return raw_cmd.lower(), args
 
 
 def format_price_message(ticker: PriceTicker) -> str:
+    """Formats a deterministic real-time price response."""
     price_val = ticker.price
     if price_val >= 1.0:
-        price_str = f"{price_val:,.2f}" if price_val >= 100 else f"{price_val:,.4f}"
+        price_str = f"${price_val:,.2f}" if price_val >= 100 else f"${price_val:,.4f}"
     else:
-        price_str = f"{price_val:.8f}".rstrip("0").rstrip(".")
-        
-    source_name = getattr(ticker, "source", "Binance Spot")
-    return (
-        f"📊 *{ticker.symbol} Live Price*\n"
-        f"• *Price:* `${price_str}`\n"
-        f"• *Source:* {source_name} (Verified)\n"
-        f"• *UTC Time:* `{ticker.timestamp}`"
-    )
+        price_str = f"${price_val:.6f}".rstrip("0").rstrip(".")
+
+    lines = [
+        f"💰 *{ticker.symbol} Live Spot Price (لائیو ریٹ)*\n",
+        f"• *Price (USD):* `{price_str}`",
+        f"• *Data Source:* {ticker.source}",
+        f"• *UTC Time:* `{ticker.timestamp}`\n",
+        f"_کوئی فرضی یا تخمینی ویلیو نہیں ہے۔ یہ براہ راست لائیو ایکسچینج فیڈ ہے۔_"
+    ]
+    return "\n".join(lines)
 
 
 def format_ticker_message(t: Ticker24h) -> str:
-    change_sign = "+" if t.price_change >= 0 else ""
+    """Formats 24h rolling market statistics."""
     change_emoji = "🟢" if t.price_change >= 0 else "🔴"
-    
-    if t.last_price >= 1.0:
-        price_str = f"{t.last_price:,.2f}" if t.last_price >= 100 else f"{t.last_price:,.4f}"
-        high_str = f"{t.high_price:,.2f}" if t.high_price >= 100 else f"{t.high_price:,.4f}"
-        low_str = f"{t.low_price:,.2f}" if t.low_price >= 100 else f"{t.low_price:,.4f}"
-    else:
-        price_str = f"{t.last_price:.8f}".rstrip("0").rstrip(".")
-        high_str = f"{t.high_price:.8f}".rstrip("0").rstrip(".")
-        low_str = f"{t.low_price:.8f}".rstrip("0").rstrip(".")
-        
-    source_name = getattr(t, "source", "Binance Spot")
-    return (
-        f"📈 *{t.symbol} 24h Ticker Summary*\n"
-        f"• *Last Price:* `${price_str}`\n"
-        f"• *24h Change:* {change_emoji} `{change_sign}{t.price_change_percent:.2f}%` ({change_sign}${t.price_change:,.4f})\n"
-        f"• *24h High:* `${high_str}`\n"
-        f"• *24h Low:* `${low_str}`\n"
-        f"• *24h Base Volume:* `{t.volume:,.2f}`\n"
-        f"• *24h Quote Volume:* `${t.quote_volume:,.2f} USDT`\n"
-        f"• *Source:* {source_name} (Verified)\n"
+    change_sign = "+" if t.price_change >= 0 else ""
+
+    lines = [
+        f"📈 *{t.symbol} 24h Market Summary (24 گھنٹے کی مارکیٹ سمری)*\n",
+        f"• *Last Price:* `${t.last_price:,.2f}`",
+        f"• *24h Change:* {change_emoji} `{change_sign}{t.price_change_percent:.2f}%` (`${change_sign}{t.price_change:,.2f}`)",
+        f"• *24h High:* `${t.high_price:,.2f}`",
+        f"• *24h Low:* `${t.low_price:,.2f}`",
+        f"• *24h Volume (Coins):* `{t.volume:,.2f}`",
+        f"• *24h Volume (USD):* `${t.quote_volume:,.2f}`\n",
+        f"• *Source:* {t.source}",
         f"• *UTC Time:* `{t.timestamp}`"
-    )
+    ]
+    return "\n".join(lines)
 
 
 def format_depth_message(d: OrderBookDepth) -> str:
-    source_name = getattr(d, "source", "Binance Order Book")
+    """Formats order book bids and asks with spread."""
     lines = [
-        f"📖 *{d.symbol} Order Book Depth (Top 5)*\n"
-        f"• *Best Bid:* `${d.best_bid:,.4f}`\n"
-        f"• *Best Ask:* `${d.best_ask:,.4f}`\n"
-        f"• *Spread:* `${d.spread:,.4f}` (`{d.spread_percentage:.3f}%`)\n",
-        "*Asks (Sellers):*"
+        f"📊 *{d.symbol} Order Book Depth (آرڈر بک کی گہرائی)*\n",
+        f"• *Best Bid (خریدار):* `${d.best_bid:,.2f}`",
+        f"• *Best Ask (فروخت کنندہ):* `${d.best_ask:,.2f}`",
+        f"• *Spread:* `${d.spread:,.2f}` (`{d.spread_percentage:.3f}%`)\n",
+        "*Top 5 Asks (Sell Orders):*"
     ]
-    for p, q in reversed(d.asks):
-        lines.append(f"  🔴 `${p:,.4f}` — `{q:,.4f}`")
-    lines.append("\n*Bids (Buyers):*")
-    for p, q in d.bids:
-        lines.append(f"  🟢 `${p:,.4f}` — `{q:,.4f}`")
-    lines.append(f"\n• *Source:* {source_name}\n• *UTC Time:* `{d.timestamp}`")
+    for p, q in reversed(d.asks[:5]):
+        lines.append(f"  🔴 `${p:,.2f}` — `{q:,.4f}`")
+
+    lines.append("\n*Top 5 Bids (Buy Orders):*")
+    for p, q in d.bids[:5]:
+        lines.append(f"  🟢 `${p:,.2f}` — `{q:,.4f}`")
+
+    lines.extend([
+        f"\n• *Source:* {d.source}",
+        f"• *UTC Time:* `{d.timestamp}`"
+    ])
     return "\n".join(lines)
 
 
@@ -600,15 +593,21 @@ async def handle_command(
 
         try:
             mtype = infer_memory_type(content)
-            mem_id = await memory_repo.add_memory(user_id, content, memory_type=mtype)
-            saved_msg = (
-                f"💾 *یادداشت کامیابی کے ساتھ محفوظ کر لی گئی ہے! (Memory Saved)*\n\n"
-                f"• *ID:* `{mem_id}`\n"
-                f"• *نوعیت (Type):* `{mtype}`\n"
-                f"• *متن (Content):* {content}\n\n"
-                f"_یہ معلومات مستقبل کی گفتگو میں بطور حوالہ استعمال ہوگی۔_"
-            )
-            await telegram_client.send_message(chat_id, saved_msg, parse_mode="Markdown")
+            res = await memory_repo.add_memory(user_id, memory_type=mtype, content=content)
+            if isinstance(res, dict) and res.get("success"):
+                saved_msg = (
+                    f"💾 *یادداشت کامیابی کے ساتھ محفوظ کر لی گئی ہے! (Memory Saved)*\n\n"
+                    f"• *نوعیت (Type):* `{mtype}`\n"
+                    f"• *متن (Content):* {content}\n\n"
+                    f"_یہ معلومات مستقبل کی گفتگو میں بطور حوالہ استعمال ہوگی۔_"
+                )
+                await telegram_client.send_message(chat_id, saved_msg, parse_mode="Markdown")
+            elif isinstance(res, dict) and res.get("reason") == "duplicate":
+                await telegram_client.send_message(chat_id, "ℹ️ یہ معلومات پہلے سے آپ کی یادداشت میں محفوظ ہے۔", parse_mode="Markdown")
+            elif isinstance(res, dict) and res.get("reason") == "limit_reached":
+                await telegram_client.send_message(chat_id, "⚠️ آپ کی یادداشت کی گنجائش (100) مکمل ہو چکی ہے۔", parse_mode="Markdown")
+            else:
+                await telegram_client.send_message(chat_id, "⚠️ معذرت، ڈیٹا بیس ایرر کے باعث یادداشت محفوظ نہیں ہو سکی۔", parse_mode="")
         except Exception as e:
             logger.error(f"Error adding memory: {e}")
             await telegram_client.send_message(chat_id, "⚠️ معذرت، ڈیٹا بیس ایرر کے باعث یادداشت محفوظ نہیں ہو سکی۔", parse_mode="")
@@ -646,7 +645,7 @@ async def handle_command(
         if not memory_repo or not memory_repo.db.is_available or not user_id:
             await telegram_client.send_message(chat_id, "⚠️ ڈیٹا بیس فی الوقت دستیاب نہیں ہے۔", parse_mode="")
             return True
-        await memory_repo.clear_all_memories(user_id)
+        await memory_repo.delete_all_memories(user_id)
         await telegram_client.send_message(chat_id, "🗑️ *تمام مستقل یادداشتیں کامیابی کے ساتھ ڈیلیٹ کر دی گئی ہیں (All Memories Deleted).* ", parse_mode="Markdown")
         return True
 
@@ -684,7 +683,7 @@ async def handle_command(
         mem_id = target_mem.get("id")
         await memory_repo.delete_memory(user_id, mem_id)
         
-        del_msg = f"🗑️ *یادداشت نمبر {target_idx} ڈیلیٹ کر دی گئی ہے (Memory #{target_idx} Deleted):*\n`{target_mem.get('content')}`"
+        del_msg = f"🗑️ *یادداشت نمبر {target_idx} ڈیلیٹ کر دی گئی ہے (Memory #{target_idx} Deleted):*\n`{target_mem.get('content', '')}`"
         await telegram_client.send_message(chat_id, del_msg, parse_mode="Markdown")
         return True
 
@@ -701,7 +700,7 @@ async def handle_command(
                     f"• *D1 Database:* `Connected (Active)`\n"
                     f"• *صارف کا نام:* {profile.get('display_name') if profile else 'N/A'}\n"
                     f"• *Telegram ID:* `{user_id}`\n"
-                    f"• *محفوظ شدہ یادداشتیں (Memories):* `{mem_count}`\n"
+                    f"• *محفوظ شدہ یادداشتیں (Memories):*\ `{mem_count}`\n"
                     f"• *واچ لسٹ کوائنز (Watchlist):* `{wl_count}`\n"
                     f"• *کل پیغامات (Total Messages):* `{msg_count}`\n\n"
                     f"_یادداشتیں دیکھنے کے لیے `/memories` اور واچ لسٹ کے لیے `/watchlist` استعمال کریں۔_"
