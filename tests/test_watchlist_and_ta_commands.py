@@ -15,7 +15,11 @@ from storage.repositories import (
 from router.command_router import handle_command
 from router.message_router import dispatch_telegram_update
 from trading.binance_client import BinanceClient
-from ai.prompts_builder import extract_crypto_symbols
+from ai.prompts_builder import (
+    extract_crypto_symbols,
+    extract_timeframe,
+    has_technical_analysis_intent,
+)
 
 
 class MockD1Statement:
@@ -121,6 +125,28 @@ class TestPhase8Commands(unittest.TestCase):
         symbols_pepe = extract_crypto_symbols("Should I buy PEPE or ETH?")
         self.assertIn("PEPEUSDT", symbols_pepe)
         self.assertIn("ETHUSDT", symbols_pepe)
+
+    def test_extract_timeframe(self):
+        self.assertEqual(extract_timeframe("look at BTC on the 1-hour chart and tell me what you're seeing."), "1h")
+        self.assertEqual(extract_timeframe("analyze BTC on 4h"), "4h")
+        self.assertEqual(extract_timeframe("what is ETH looking like on the 15 minute chart?"), "15m")
+        self.assertEqual(extract_timeframe("give me technical confirmation for SOL on 1h"), "1h")
+        self.assertEqual(extract_timeframe("what does BTC look like on the daily timeframe?"), "1d")
+        self.assertEqual(extract_timeframe("check SOL on 15m"), "15m")
+        self.assertEqual(extract_timeframe("what is Bitcoin doing hourly?"), "1h")
+        self.assertEqual(extract_timeframe("analyze Ethereum weekly chart"), "1w")
+        self.assertEqual(extract_timeframe("how is btc looking on 4 hours timeframe"), "4h")
+        self.assertIsNone(extract_timeframe("what is the price of BTC?"))
+        self.assertIsNone(extract_timeframe("tell me a joke"))
+
+    def test_has_technical_analysis_intent(self):
+        self.assertTrue(has_technical_analysis_intent("look at BTC on the 1-hour chart and tell me what you're seeing"))
+        self.assertTrue(has_technical_analysis_intent("analyze BTC on 4h"))
+        self.assertTrue(has_technical_analysis_intent("is BTC overbought?"))
+        self.assertTrue(has_technical_analysis_intent("what is RSI for Solana?"))
+        self.assertTrue(has_technical_analysis_intent("give me technical confirmation for SOL on 1h"))
+        self.assertFalse(has_technical_analysis_intent("what is the price of BTC?"))
+        self.assertFalse(has_technical_analysis_intent("hello assistant"))
 
     def test_watch_and_watchlist_commands(self):
         async def mock_fetch(url, **kwargs):
@@ -250,6 +276,87 @@ class TestPhase8Commands(unittest.TestCase):
         )
         self.assertIn("State & Memory Status", self.tg.sent[-1]["text"])
         self.assertIn("واچ لسٹ کوائنز", self.tg.sent[-1]["text"])
+
+    def test_natural_language_timeframe_aware_ta_grounding(self):
+        klines_calls = []
+        async def mock_fetch(url, **kwargs):
+            if "ticker/24hr" in url:
+                return MockHttpResponse(json.dumps({
+                    "symbol": "BTCUSDT", "lastPrice": "68500.00", "priceChange": "1200.00",
+                    "priceChangePercent": "1.78", "highPrice": "69000.00", "lowPrice": "67000.00",
+                    "volume": "10000.00", "quoteVolume": "685000000.00"
+                }))
+            elif "klines" in url:
+                klines_calls.append(url)
+                klines = []
+                for i in range(50):
+                    klines.append([1700000000000 + i * 3600000, "67000", "68000", "66500", "67800", "100.0", 1700003599000])
+                return MockHttpResponse(json.dumps(klines))
+            return MockHttpResponse("{}")
+
+        b_client = BinanceClient(mock_fetch)
+
+        # 1. 1-hour natural language query
+        update1 = {
+            "message": {
+                "chat": {"id": 8116631925},
+                "from": {"id": 8116631925, "first_name": "Abdul"},
+                "text": "look at BTC on the 1-hour chart and tell me what you're seeing."
+            }
+        }
+        self.loop.run_until_complete(
+            dispatch_telegram_update(update1, self.settings, self.tg, self.gem, binance_client=b_client)
+        )
+        self.assertIn("BTCUSDT - 1H Timeframe", self.gem.last_prompt)
+        self.assertIn("RSI (14, Wilder Smoothed)", self.gem.last_prompt)
+        self.assertIn("EMA 20", self.gem.last_prompt)
+        self.assertIn("Bollinger Bands", self.gem.last_prompt)
+        self.assertIn("ATR-14", self.gem.last_prompt)
+        self.assertIn("interval=1h", klines_calls[-1])
+
+        # 2. 4h natural language query
+        update2 = {
+            "message": {
+                "chat": {"id": 8116631925},
+                "from": {"id": 8116631925, "first_name": "Abdul"},
+                "text": "analyze BTC on 4h"
+            }
+        }
+        self.loop.run_until_complete(
+            dispatch_telegram_update(update2, self.settings, self.tg, self.gem, binance_client=b_client)
+        )
+        self.assertIn("BTCUSDT - 4H Timeframe", self.gem.last_prompt)
+        self.assertIn("interval=4h", klines_calls[-1])
+
+        # 3. Daily timeframe natural language query
+        update3 = {
+            "message": {
+                "chat": {"id": 8116631925},
+                "from": {"id": 8116631925, "first_name": "Abdul"},
+                "text": "what does BTC look like on the daily timeframe?"
+            }
+        }
+        self.loop.run_until_complete(
+            dispatch_telegram_update(update3, self.settings, self.tg, self.gem, binance_client=b_client)
+        )
+        self.assertIn("BTCUSDT - 1D Timeframe", self.gem.last_prompt)
+        self.assertIn("interval=1d", klines_calls[-1])
+
+        # 4. Plain price query without TA intent
+        count_before = len(klines_calls)
+        update4 = {
+            "message": {
+                "chat": {"id": 8116631925},
+                "from": {"id": 8116631925, "first_name": "Abdul"},
+                "text": "what is the price of BTC?"
+            }
+        }
+        self.loop.run_until_complete(
+            dispatch_telegram_update(update4, self.settings, self.tg, self.gem, binance_client=b_client)
+        )
+        self.assertIn("Verified Spot Price: $68,500.00", self.gem.last_prompt)
+        self.assertNotIn("Deterministic Technical Analysis", self.gem.last_prompt)
+        self.assertEqual(len(klines_calls), count_before)
 
 
 if __name__ == "__main__":

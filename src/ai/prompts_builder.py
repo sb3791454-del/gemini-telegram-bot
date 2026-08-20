@@ -52,6 +52,24 @@ CRYPTO_ALIASES = {
     "TETHER": "USDT", "USDT": "USDT",
 }
 
+TIMEFRAME_PATTERNS = [
+    # 15m patterns
+    (r"\b(?:15\s*(?:m|min|mins|minute|minutes)|15-min|15-minute|15-minutes)\b|15\s*(?:منٹ|منٹوں)", "15m"),
+    # 4h patterns (must precede 1h)
+    (r"\b(?:4\s*(?:h|hr|hrs|hour|hours)|4-h|4-hr|4-hour|4-hours)\b|4\s*(?:گھنٹے|گھنٹہ|گھنٹوں)", "4h"),
+    # 1h patterns
+    (r"\b(?:1\s*(?:h|hr|hrs|hour|hours)|1-h|1-hr|1-hour|1-hours|hourly|hour\s+chart|hourly\s+chart)\b|1\s*(?:گھنٹہ|گھنٹے)", "1h"),
+    # 1d patterns
+    (r"\b(?:1\s*(?:d|day|days)|1-d|1-day|1-days|daily|day\s+chart|daily\s+chart|daily\s+timeframe)\b|1\s*دن|روزانہ", "1d"),
+    # 1w patterns
+    (r"\b(?:1\s*(?:w|wk|wks|week|weeks)|1-w|1-week|1-weeks|weekly|week\s+chart|weekly\s+chart|weekly\s+timeframe)\b|1\s*ہفتہ|ہفتہ\s*وار", "1w"),
+]
+
+TA_INTENT_PATTERNS = [
+    r"\b(?:chart|charts|technical|ta|analyze|analysis|trend|structure|support|resistance|breakout|overbought|oversold|setup|confirmation|candlestick|candle|candles|kline|klines|bullish|bearish|moving\s+average|moving\s+averages|timeframe|timeframes|time\s+frame|time\s+frames|rsi|ema|sma|bollinger|bb|atr|indicator|indicators)\b",
+    r"تجزیہ|چارٹ|رجحان|سپورٹ|مزاحمت|انڈیکیٹر|کینڈل"
+]
+
 
 def get_current_utc_iso() -> str:
     """Returns current UTC timestamp in ISO-8601 format (YYYY-MM-DDTHH:MM:SSZ)."""
@@ -87,6 +105,33 @@ def extract_crypto_symbols(text: str, max_symbols: int = 2) -> List[str]:
                 break
 
     return found
+
+
+def extract_timeframe(text: str) -> Optional[str]:
+    """
+    Extracts and normalizes requested chart timeframe from natural language query.
+    e.g. '1-hour chart' -> '1h', 'daily timeframe' -> '1d', '15 minute' -> '15m'
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    for pattern, canonical in TIMEFRAME_PATTERNS:
+        if re.search(pattern, lower, re.IGNORECASE):
+            return canonical
+    return None
+
+
+def has_technical_analysis_intent(text: str) -> bool:
+    """
+    Determines whether a message is seeking technical analysis or indicator evaluation.
+    """
+    if not text:
+        return False
+    lower = text.lower()
+    for pattern in TA_INTENT_PATTERNS:
+        if re.search(pattern, lower, re.IGNORECASE):
+            return True
+    return False
 
 
 def select_relevant_memories(
@@ -136,7 +181,7 @@ def format_prompt_with_context(
     Constructs the unified prompt with clearly separated sections:
     1. System constitution & operating instructions
     2. Temporal grounding (current UTC timestamp)
-    3. Verified live market grounding (if crypto query detected)
+    3. Verified live market & technical indicator grounding (if crypto query detected)
     4. Long-term memories (user-provided background context)
     5. Recent conversation history (active session turns)
     6. Current user message
@@ -151,8 +196,9 @@ def format_prompt_with_context(
     if market_grounding_text:
         sections.append(
             "[LIVE VERIFIED MARKET GROUNDING — STRICT REAL-TIME DATA]\n"
-            "The following verified live market data was retrieved directly from exchange feeds at this exact moment.\n"
-            "You MUST treat these numbers as indisputable ground truth. Never hallucinate, invent, or contradict these figures.\n\n"
+            "The following verified live market data and deterministic technical indicators were retrieved directly from exchange feeds at this exact moment.\n"
+            "You MUST treat these numbers, indicator calculations, and timeframe metrics as immutable ground truth. Never hallucinate, invent, or contradict these figures.\n"
+            "If the user asked for a specific timeframe (e.g. 15m, 1h, 4h, 1d, 1w), ground your answer in the verified technical indicators for that requested timeframe.\n\n"
             f"{market_grounding_text}"
         )
 

@@ -10,6 +10,8 @@ from ai.gemini_client import GeminiClient
 from ai.prompts_builder import (
     select_relevant_memories,
     extract_crypto_symbols,
+    extract_timeframe,
+    has_technical_analysis_intent,
     format_prompt_with_context,
 )
 from router.command_router import handle_command
@@ -136,7 +138,7 @@ async def dispatch_telegram_update(
                 except Exception as e:
                     logger.error(f"Error retrieving session history: {e}")
 
-            # Step 5b: Retrieve user's stored long-term memories from D1 (non-blocking / resilient)
+            # Step 5b: Retrieve stored long-term memories from D1 (non-blocking / resilient)
             if memory_repo and user_id and memory_repo.db.is_available:
                 try:
                     all_user_memories = await memory_repo.get_all_memories(user_id)
@@ -144,23 +146,54 @@ async def dispatch_telegram_update(
                 except Exception as e:
                     logger.error(f"Error selecting relevant memories: {e}")
 
-            # Step 5c: Automated Live Market Grounding (Extract symbols and inject live data)
+            # Step 5c: Automated Live Market Grounding & Timeframe-Aware Technical Analysis
             detected_symbols = extract_crypto_symbols(text, max_symbols=2)
             if detected_symbols and binance_client:
+                timeframe = extract_timeframe(text)
+                wants_ta = has_technical_analysis_intent(text) or (timeframe is not None)
+                target_tf = timeframe or "1h"
+
                 for sym in detected_symbols:
                     try:
                         ticker_data = await binance_client.get_24h_ticker(sym)
                         change_sign = "+" if ticker_data.price_change >= 0 else ""
-                        market_grounding_lines.append(
-                            f"Asset: {ticker_data.symbol} | Verified Price: ${ticker_data.last_price:,.2f} | "
+                        ticker_line = (
+                            f"Asset: {ticker_data.symbol} | Verified Spot Price: ${ticker_data.last_price:,.2f} | "
                             f"24h Change: {change_sign}{ticker_data.price_change_percent:.2f}% | "
                             f"24h High: ${ticker_data.high_price:,.2f} | 24h Low: ${ticker_data.low_price:,.2f} | "
+                            f"24h Volume (USD): ${ticker_data.quote_volume:,.2f} | "
                             f"Source: {ticker_data.source} (UTC: {ticker_data.timestamp})"
                         )
+
+                        if wants_ta:
+                            try:
+                                ta = await binance_client.get_technical_analysis(sym, timeframe=target_tf)
+                                ema_parts = [f"EMA 20: ${ta.ema_20:,.2f}", f"EMA 50: ${ta.ema_50:,.2f}"]
+                                if ta.ema_200:
+                                    ema_parts.append(f"EMA 200: ${ta.ema_200:,.2f}")
+                                ema_str = " | ".join(ema_parts)
+
+                                ta_lines = [
+                                    f"• Deterministic Technical Analysis ({ta.symbol} - {ta.timeframe.upper()} Timeframe):",
+                                    f"  - Verified Price: ${ta.current_price:,.2f}",
+                                    f"  - Trend Structure: {ta.trend}",
+                                    f"  - RSI (14, Wilder Smoothed): {ta.rsi_14:.1f} [{ta.rsi_condition}]",
+                                    f"  - Moving Averages: {ema_str}",
+                                    f"  - Bollinger Bands (20, 2σ): Upper: ${ta.bb_upper:,.2f} | Middle (SMA 20): ${ta.bb_middle:,.2f} | Lower: ${ta.bb_lower:,.2f} | Bandwidth: {ta.bb_bandwidth_pct:.2f}%",
+                                    f"  - Volatility & Risk: ATR-14: ${ta.atr_14:,.2f} | Recommended Dynamic SL Buffer (1.5x ATR): ${ta.suggested_sl_distance:,.2f}",
+                                    f"  - Key Lookback Levels: Resistance: ${ta.resistance_level:,.2f} | Support: ${ta.support_level:,.2f}",
+                                    f"  - Candlestick Data Source: {ta.source} (UTC: {ta.timestamp})",
+                                ]
+                                market_grounding_lines.append(ticker_line + "\n" + "\n".join(ta_lines))
+                            except Exception as e:
+                                logger.warning(f"Could not compute technical analysis for {sym} ({target_tf}): {e}")
+                                market_grounding_lines.append(ticker_line)
+                        else:
+                            market_grounding_lines.append(ticker_line)
                     except Exception as e:
                         logger.warning(f"Could not ground symbol {sym}: {e}")
 
-            market_grounding_text = "\n".join(market_grounding_lines) if market_grounding_lines else None
+            market_grounding_text = "\n\n".join(market_grounding_lines) if market_grounding_lines else None
 
             # Step 5d: Format final prompt combining grounding, memories, history, and user query
             final_prompt = format_prompt_with_context(
