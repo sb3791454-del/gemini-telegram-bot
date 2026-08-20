@@ -3,8 +3,33 @@ Deterministic Position Sizing and Risk Management Calculator.
 Enforces the Foundational Trading Assistant Constitution: CAPITAL PRESERVATION FIRST.
 """
 
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from trading.models import RiskCalculationResult
+
+# Single, deterministic system source of truth for ATR Stop-Loss buffer multiplier
+DEFAULT_ATR_MULTIPLIER: float = 1.5
+
+
+def calculate_hard_stop(
+    structural_warning: float,
+    atr: float,
+    direction: str = "LONG",
+    k: float = DEFAULT_ATR_MULTIPLIER
+) -> float:
+    """
+    Calculates the deterministic Hard Stop-Loss price using structural warning and ATR buffer.
+    - For LONG: Hard SL = Structural Warning - (k * ATR)  [strictly below structural warning]
+    - For SHORT: Hard SL = Structural Warning + (k * ATR) [strictly above structural warning]
+    """
+    if atr <= 0:
+        raise ValueError("ATR must be greater than zero.")
+    if structural_warning <= 0:
+        raise ValueError("Structural warning level must be greater than zero.")
+
+    trade_dir = direction.strip().upper() if direction else "LONG"
+    if trade_dir == "SHORT":
+        return round(structural_warning + (k * atr), 2)
+    return round(max(0.0, structural_warning - (k * atr)), 2)
 
 
 def calculate_position_risk(
@@ -52,13 +77,13 @@ def calculate_position_risk(
     effective_leverage = position_value_usd / capital
 
     if trade_dir == "LONG":
-        tp1 = entry_price + (1.5 * price_diff)
-        tp2 = entry_price + (2.0 * price_diff)
-        tp3 = entry_price + (3.0 * price_diff)
+        tp1 = round(entry_price + (1.5 * price_diff), 2)
+        tp2 = round(entry_price + (2.0 * price_diff), 2)
+        tp3 = round(entry_price + (3.0 * price_diff), 2)
     else:
-        tp1 = max(0.0, entry_price - (1.5 * price_diff))
-        tp2 = max(0.0, entry_price - (2.0 * price_diff))
-        tp3 = max(0.0, entry_price - (3.0 * price_diff))
+        tp1 = round(max(0.0, entry_price - (1.5 * price_diff)), 2)
+        tp2 = round(max(0.0, entry_price - (2.0 * price_diff)), 2)
+        tp3 = round(max(0.0, entry_price - (3.0 * price_diff)), 2)
 
     warnings: List[str] = []
     if risk_pct > 3.0:

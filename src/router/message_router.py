@@ -11,8 +11,11 @@ from ai.prompts_builder import (
     select_relevant_memories,
     extract_crypto_symbols,
     extract_timeframe,
+    extract_capital_and_risk,
+    extract_hypothetical_trade_params,
     has_technical_analysis_intent,
     format_market_state_grounding,
+    format_hypothetical_trade_grounding,
     format_prompt_with_context,
 )
 from router.command_router import handle_command
@@ -149,6 +152,9 @@ async def dispatch_telegram_update(
 
             # Step 5c: Automated Live Market Grounding & Deterministic Market Reasoning Engine
             detected_symbols = extract_crypto_symbols(text, max_symbols=2)
+            user_capital, user_risk_pct = extract_capital_and_risk(text)
+            hypo_params = extract_hypothetical_trade_params(text)
+
             if detected_symbols and binance_client:
                 timeframe = extract_timeframe(text)
                 wants_ta = has_technical_analysis_intent(text) or (timeframe is not None)
@@ -162,7 +168,13 @@ async def dispatch_telegram_update(
                                 primary_timeframe=target_tf,
                                 include_mtf=True
                             )
-                            market_grounding_lines.append(format_market_state_grounding(market_state))
+                            market_grounding_lines.append(
+                                format_market_state_grounding(
+                                    market_state,
+                                    user_capital=user_capital,
+                                    user_risk_pct=user_risk_pct
+                                )
+                            )
                         except Exception as e:
                             logger.warning(f"Could not compute full market state for {sym} ({target_tf}): {e}")
                             # Fallback to 24h ticker if klines fail
@@ -193,6 +205,10 @@ async def dispatch_telegram_update(
                             market_grounding_lines.append(ticker_line)
                         except Exception as e:
                             logger.warning(f"Could not ground symbol {sym}: {e}")
+
+            elif hypo_params:
+                # Handle user-supplied hypothetical numbers deterministically
+                market_grounding_lines.append(format_hypothetical_trade_grounding(hypo_params))
 
             market_grounding_text = "\n\n".join(market_grounding_lines) if market_grounding_lines else None
 

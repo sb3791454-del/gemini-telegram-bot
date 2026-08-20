@@ -32,7 +32,11 @@ from trading.technical_analysis import (
     evaluate_deterministic_setup,
     evaluate_market_structure,
 )
-from trading.risk_calculator import calculate_position_risk
+from trading.risk_calculator import (
+    DEFAULT_ATR_MULTIPLIER,
+    calculate_hard_stop,
+    calculate_position_risk,
+)
 
 __all__ = [
     "PriceTicker",
@@ -61,5 +65,7 @@ __all__ = [
     "determine_mtf_alignment",
     "evaluate_deterministic_setup",
     "evaluate_market_structure",
+    "DEFAULT_ATR_MULTIPLIER",
+    "calculate_hard_stop",
     "calculate_position_risk",
 ]

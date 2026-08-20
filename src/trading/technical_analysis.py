@@ -5,6 +5,7 @@ Runs natively inside Cloudflare Workers Pyodide runtime with zero C-extensions o
 
 import math
 from typing import List, Tuple, Optional, Dict
+from trading.risk_calculator import DEFAULT_ATR_MULTIPLIER, calculate_hard_stop
 from trading.models import (
     Candle,
     SwingPoint,
@@ -1108,7 +1109,7 @@ def evaluate_market_structure(
         vol_state = "Normal Volatility Range"
 
     atr_val = calculate_atr(candles, period=14)
-    suggested_sl = atr_val * 1.5
+    suggested_sl = atr_val * DEFAULT_ATR_MULTIPLIER
 
     # Volume state
     vol_recent = volumes[-1]

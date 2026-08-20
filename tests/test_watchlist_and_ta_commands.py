@@ -1,3 +1,33 @@
+"""
+Comprehensive Forensic Test Suite for Phase 8.2 & 8.3 — Deterministic Market Reasoning, Hard-SL Integrity & Risk Consistency.
+Covers Core Objectives #1 through #25:
+1. Long R:R exact mathematics
+2. Short R:R exact mathematics
+3. Long target already below current price
+4. Short target already above current price
+5. Resistance invalidates theoretical long R:R
+6. Support invalidates theoretical short R:R
+7. Structural warning differs from hard SL
+8. Invalid entry/SL relationships
+9. Current-price consistency
+10. Pullback setup when market is extended
+11. Breakout confirmation setup
+12. No-trade when no executable setup exists
+13. Long/short symmetry
+14. Gemini is never responsible for these calculations
+15. Long setup ready healthy runway
+16. Short setup ready healthy runway
+17. Bullish structure breakdown to no trade
+18. Bearish structure breakout to no trade
+19. Multi-timeframe conflict execution
+20. Insufficient data candle threshold
+21. Hypothetical user scenario with ATR exact math
+22. Hypothetical user scenario missing ATR reports insufficient data
+23. Natural language capital and risk sizing live trade
+24. Natural language hypothetical dispatch end to end
+25. No unsupported statistical claims in instructions
+"""
+
 import unittest
 import asyncio
 import json
@@ -39,11 +69,18 @@ from trading.technical_analysis import (
     evaluate_deterministic_setup,
     evaluate_market_structure,
 )
-from trading.risk_calculator import calculate_position_risk
+from trading.risk_calculator import (
+    DEFAULT_ATR_MULTIPLIER,
+    calculate_hard_stop,
+    calculate_position_risk,
+)
 from ai.prompts_builder import (
     extract_crypto_symbols,
     extract_timeframe,
     has_technical_analysis_intent,
+    extract_capital_and_risk,
+    extract_hypothetical_trade_params,
+    format_hypothetical_trade_grounding,
     format_market_state_grounding,
     format_prompt_with_context,
 )
@@ -565,6 +602,118 @@ class TestPhase82MarketReasoningEngine(unittest.TestCase):
         self.assertEqual(setup.setup_state, "INSUFFICIENT_DATA")
         self.assertEqual(setup.direction_bias, "NEUTRAL")
         self.assertIn("minimum 15 candles", setup.reasons[0])
+
+    # --- 21. HYPOTHETICAL USER SCENARIO WITH ATR EXACT MATH ---
+    def test_hypothetical_user_scenario_with_atr_exact_math(self):
+        """
+        Verify that when user supplies Entry $70,500, SW $70,000, ATR $300, Capital $1,000, Risk 1%:
+        - Structural Warning ($70,000) != Hard SL ($69,550)
+        - Risk Per Unit is $950 (not $500)
+        - Position size is 0.0105 BTC
+        - Targets are TP1 $71,925, TP2 $72,400, TP3 $73,350
+        """
+        user_msg = "Entry = $70,500, Structural Warning = $70,000, ATR = $300, Capital = $1,000, Risk = 1%"
+        params = extract_hypothetical_trade_params(user_msg)
+        self.assertIsNotNone(params)
+        self.assertEqual(params["entry"], 70500.0)
+        self.assertEqual(params["structural_warning"], 70000.0)
+        self.assertEqual(params["atr"], 300.0)
+        self.assertEqual(params["capital"], 1000.0)
+        self.assertEqual(params["risk_pct"], 1.0)
+
+        grounding = format_hypothetical_trade_grounding(params)
+        self.assertIn("Proposed Hard Stop-Loss: $69,550.00", grounding)
+        self.assertIn("Structural Warning ($70,000.00) != Hard Stop Loss ($69,550.00)", grounding)
+        self.assertIn("Exact Risk Per Unit: $950.00", grounding)
+        self.assertIn("TP1 (1:1.5 R:R): $71,925.00", grounding)
+        self.assertIn("TP2 (1:2.0 R:R): $72,400.00", grounding)
+        self.assertIn("TP3 (1:3.0 R:R): $73,350.00", grounding)
+        self.assertIn("Position Size: 0.0105 units", grounding)
+        self.assertIn("Effective Leverage: 0.74x", grounding)
+
+    # --- 22. HYPOTHETICAL USER SCENARIO MISSING ATR REPORTS INSUFFICIENT DATA ---
+    def test_hypothetical_user_scenario_missing_atr_reports_insufficient_data(self):
+        """
+        Verify that when user supplies Entry $70,500 and SW $70,000 WITHOUT ATR:
+        - The engine does NOT equate Hard SL to $70,000
+        - The engine explicitly outputs an INSUFFICIENT DATA note
+        """
+        user_msg = "Entry $70,500, structural warning $70,000. Calculate the hard stop."
+        params = extract_hypothetical_trade_params(user_msg)
+        self.assertIsNotNone(params)
+        self.assertNotIn("atr", params)
+
+        grounding = format_hypothetical_trade_grounding(params)
+        self.assertIn("INSUFFICIENT DATA FOR HARD STOP", grounding)
+        self.assertIn("Structural Warning ($70,000.00) is NOT the Hard Stop Loss", grounding)
+        self.assertNotIn("Proposed Hard Stop-Loss: $70,000.00", grounding)
+
+    # --- 23. NATURAL LANGUAGE CAPITAL AND RISK SIZING LIVE TRADE ---
+    def test_natural_language_capital_and_risk_sizing_live_trade(self):
+        """
+        Verify Test A: 'I have $1,000 capital and risk 1%. Find me the best BTCUSDT trade right now.'
+        - Capital $1,000 and Risk 1% are extracted
+        - Position sizing is computed by the deterministic engine and injected into Gemini context
+        """
+        async def mock_fetch(url, **kwargs):
+            if "klines" in url:
+                candles_data = []
+                for i in range(50):
+                    p = 65000 + i * 30
+                    candles_data.append([1700000000000 + i * 3600000, str(p), str(p + 100), str(p - 100), str(p + 10), "100.0", 1700003599000])
+                return MockHttpResponse(json.dumps(candles_data))
+            return MockHttpResponse(json.dumps({"symbol": "BTCUSDT", "lastPrice": "66500.00", "priceChange": "1500.00", "priceChangePercent": "2.31"}))
+
+        b_client = BinanceClient(mock_fetch)
+        update = {
+            "message": {
+                "chat": {"id": 8116631925},
+                "from": {"id": 8116631925, "first_name": "Abdul"},
+                "text": "I have $1,000 capital and risk 1%. Find me the best BTCUSDT trade right now."
+            }
+        }
+        self.loop.run_until_complete(
+            dispatch_telegram_update(update, self.settings, self.tg, self.gem, binance_client=b_client)
+        )
+
+        prompt = self.gem.last_prompt
+        self.assertIn("=== [LIVE MARKET FACTS] ===", prompt)
+        self.assertIn("=== [DETERMINISTIC TRADE SETUP EVALUATION] ===", prompt)
+        self.assertIn("Deterministic Position Sizing (Capital: $1,000.00 | Risk: 1.0%", prompt)
+        self.assertIn("Position Size:", prompt)
+        self.assertIn("Effective Leverage:", prompt)
+
+    # --- 24. NATURAL LANGUAGE HYPOTHETICAL DISPATCH END TO END ---
+    def test_natural_language_hypothetical_dispatch_end_to_end(self):
+        """
+        Verify Test C via dispatch_telegram_update:
+        'Entry $70,500, structural warning $70,000, ATR $300. Calculate the hard stop.'
+        Grounding contract is injected with exact deterministic numbers.
+        """
+        update = {
+            "message": {
+                "chat": {"id": 8116631925},
+                "from": {"id": 8116631925, "first_name": "Abdul"},
+                "text": "Entry $70,500, structural warning $70,000, ATR $300. Calculate the hard stop."
+            }
+        }
+        self.loop.run_until_complete(
+            dispatch_telegram_update(update, self.settings, self.tg, self.gem)
+        )
+
+        prompt = self.gem.last_prompt
+        self.assertIn("=== [DETERMINISTIC TRADE & RISK CALCULATION — USER HYPOTHETICAL] ===", prompt)
+        self.assertIn("Proposed Hard Stop-Loss: $69,550.00", prompt)
+        self.assertIn("Structural Warning ($70,000.00) != Hard Stop Loss ($69,550.00)", prompt)
+        self.assertIn("Exact Risk Per Unit: $950.00", prompt)
+
+    # --- 25. NO UNSUPPORTED STATISTICAL CLAIMS IN INSTRUCTIONS ---
+    def test_no_unsupported_statistical_claims_in_instructions(self):
+        """Verify that TRADING_SYSTEM_INSTRUCTIONS explicitly forbids fake statistical probability claims."""
+        from config.prompts import TRADING_SYSTEM_INSTRUCTIONS
+        self.assertIn("NO UNSUPPORTED STATISTICAL CLAIMS", TRADING_SYSTEM_INSTRUCTIONS)
+        self.assertIn("STRUCTURAL WARNING LEVEL VS HARD STOP LOSS", TRADING_SYSTEM_INSTRUCTIONS)
+        self.assertIn("DETERMINISTIC ENGINE IS THE SINGLE SOURCE OF TRUTH", TRADING_SYSTEM_INSTRUCTIONS)
 
 
 if __name__ == "__main__":
