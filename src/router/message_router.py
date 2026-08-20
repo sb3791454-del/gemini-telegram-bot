@@ -19,14 +19,20 @@ from ai.prompts_builder import (
     format_prompt_with_context,
 )
 from router.command_router import handle_command
-from config.prompts import UNAUTHORIZED_DENIAL_TEXT, IMAGE_ERROR_TEXT, FALLBACK_ERROR_TEXT
 from storage.repositories import (
     UserRepository,
     MemoryRepository,
+    SettingsRepository,
     ConversationRepository,
     WatchlistRepository,
 )
 from trading.binance_client import BinanceClient
+from config.prompts import (
+    UNAUTHORIZED_DENIAL_TEXT,
+    FALLBACK_ERROR_TEXT,
+    IMAGE_ERROR_TEXT,
+    UNSUPPORTED_MESSAGE_TEXT,
+)
 
 logger = logging.getLogger("worker.router")
 
@@ -38,106 +44,105 @@ async def dispatch_telegram_update(
     gemini_client: GeminiClient,
     user_repo: Optional[UserRepository] = None,
     memory_repo: Optional[MemoryRepository] = None,
+    settings_repo: Optional[SettingsRepository] = None,
     conversation_repo: Optional[ConversationRepository] = None,
     watchlist_repo: Optional[WatchlistRepository] = None,
     binance_client: Optional[BinanceClient] = None,
-):
-    """Processes an incoming Telegram update dictionary."""
-    message = update.get("message")
-    if not message:
-        return
-
-    chat_id = message.get("chat", {}).get("id")
-    if not chat_id:
-        return
-
-    from_user = message.get("from", {})
-    user_id = from_user.get("id")
-
-    # 1. Authorization Gatekeeper (Fail-Closed: evaluated before DB writes and AI calls)
-    if not is_user_authorized(user_id, settings):
-        await telegram_client.send_message(chat_id, UNAUTHORIZED_DENIAL_TEXT, parse_mode="Markdown")
-        return
-
-    # 2. Update Authorized User Profile in D1 (Graceful/Non-blocking)
-    if user_repo and user_id:
-        try:
-            display_name = from_user.get("first_name", "")
-            username = from_user.get("username", "")
-            await user_repo.upsert_user_profile(user_id, display_name=display_name, username=username)
-        except Exception as e:
-            logger.error(f"Error persisting user profile: {e}")
-
-    text = message.get("text", "").strip()
-    photo = message.get("photo")
-    caption = message.get("caption", "").strip()
-
-    # 3. Check for Commands (Evaluated before any Gemini calls)
-    is_command = text.startswith("/")
-    if not is_command and "entities" in message:
-        for ent in message["entities"]:
-            if ent.get("type") == "bot_command" and ent.get("offset") == 0:
-                is_command = True
-                break
-
-    if is_command:
-        handled = await handle_command(
-            text,
-            chat_id,
-            telegram_client,
-            user_id=user_id,
-            user_repo=user_repo,
-            memory_repo=memory_repo,
-            conversation_repo=conversation_repo,
-            watchlist_repo=watchlist_repo,
-            binance_client=binance_client
-        )
-        if handled:
+) -> None:
+    """
+    Main dispatching pipeline for Telegram webhook updates.
+    Enforces FAIL-CLOSED authentication, intercepts deterministic slash commands,
+    grounds trading inquiries with verified Binance market data, and executes AI generation.
+    """
+    try:
+        # Step 1: Extract message payload
+        message = update.get("message") or update.get("edited_message")
+        if not message:
             return
 
-    # 4. Handle Photos / Multimodal Vision
-    if photo:
-        await telegram_client.send_chat_action(chat_id, "typing")
-        try:
-            highest_res_photo = photo[-1]
-            file_id = highest_res_photo.get("file_id")
-            image_bytes = await telegram_client.get_file_bytes(file_id)
-            reply = await gemini_client.generate_vision(image_bytes, caption=caption, model_name=settings.gemini_model)
+        chat_id = message.get("chat", {}).get("id")
+        user_info = message.get("from", {})
+        user_id = user_info.get("id")
+
+        if not chat_id:
+            return
+
+        # Step 2: Strict Authorization (FAIL-CLOSED)
+        if not is_user_authorized(user_id, settings):
+            logger.warning(f"Unauthorized access attempt by user_id: {user_id}")
+            await telegram_client.send_message(chat_id, UNAUTHORIZED_DENIAL_TEXT, parse_mode="")
+            return
+
+        # Step 3: Register / update user record in D1 if available
+        if user_repo and user_id and user_repo.db.is_available:
+            try:
+                await user_repo.upsert_user(
+                    user_id=user_id,
+                    username=user_info.get("username"),
+                    first_name=user_info.get("first_name"),
+                    last_name=user_info.get("last_name"),
+                    language_code=user_info.get("language_code"),
+                )
+            except Exception as e:
+                logger.error(f"Error persisting user profile: {e}")
+
+        # Step 4: Handle slash commands deterministically (NO Gemini fallthrough)
+        text = message.get("text", "").strip()
+        caption = message.get("caption", "").strip()
+        effective_text = text or caption
+
+        if effective_text.startswith("/"):
+            handled = await handle_command(
+                command_text=effective_text,
+                chat_id=chat_id,
+                telegram_client=telegram_client,
+                user_id=user_id,
+                user_repo=user_repo,
+                memory_repo=memory_repo,
+                conversation_repo=conversation_repo,
+                watchlist_repo=watchlist_repo,
+                binance_client=binance_client,
+            )
+            if handled:
+                return
+
+        # Step 5: Process standard conversational messages
+        photo_list = message.get("photo")
+        if photo_list:
+            # Multimodal photo message
+            await telegram_client.send_chat_action(chat_id, "typing")
+            best_photo = photo_list[-1]
+            file_id = best_photo.get("file_id")
+
+            image_bytes = await telegram_client.download_file_bytes(file_id)
+            if not image_bytes:
+                await telegram_client.send_message(chat_id, IMAGE_ERROR_TEXT, parse_mode="")
+                return
+
+            reply = await gemini_client.generate_vision(
+                image_bytes=image_bytes,
+                caption=caption if caption else None,
+                model_name=settings.gemini_model,
+            )
             await telegram_client.send_message(chat_id, reply, parse_mode="")
+            return
 
-            if conversation_repo and user_id and conversation_repo.db.is_available and reply != IMAGE_ERROR_TEXT:
-                try:
-                    active_session = await conversation_repo.get_or_create_active_session(user_id)
-                    if active_session:
-                        user_entry = f"[User sent an image] Caption: {caption}" if caption else "[User sent an image]"
-                        await conversation_repo.add_message(user_id, active_session["id"], "user", user_entry)
-                        await conversation_repo.add_message(user_id, active_session["id"], "assistant", reply)
-                except Exception as e:
-                    logger.error(f"Error storing photo conversation turn: {e}")
-        except Exception as e:
-            logger.error(f"Error processing photo message: {e}")
-            await telegram_client.send_message(chat_id, IMAGE_ERROR_TEXT, parse_mode="")
-        return
+        elif text:
+            # Standard Text Message
+            await telegram_client.send_chat_action(chat_id, "typing")
 
-    # 5. Handle Ordinary Text Messages with Session History, Long-Term Memory, and Live Market Grounding
-    if text:
-        await telegram_client.send_chat_action(chat_id, "typing")
-        try:
-            active_session_id = None
-            recent_history = []
             relevant_memories = []
+            recent_history = []
             market_grounding_lines = []
+            active_session_id = None
 
-            # Step 5a: Retrieve active session history from D1 (non-blocking / resilient)
+            # Step 5a: Retrieve conversation history from D1 (non-blocking / resilient)
             if conversation_repo and user_id and conversation_repo.db.is_available:
                 try:
-                    active_session = await conversation_repo.get_or_create_active_session(user_id)
-                    if active_session:
-                        active_session_id = active_session["id"]
+                    active_session_id = await conversation_repo.get_or_create_active_session(user_id)
+                    if active_session_id:
                         recent_history = await conversation_repo.get_recent_messages(
-                            user_id,
-                            active_session_id,
-                            limit=settings.conversation_history_limit
+                            user_id, active_session_id, limit=settings.history_limit
                         )
                 except Exception as e:
                     logger.error(f"Error retrieving session history: {e}")
@@ -206,7 +211,7 @@ async def dispatch_telegram_update(
                         except Exception as e:
                             logger.warning(f"Could not ground symbol {sym}: {e}")
 
-            elif hypo_params:
+            if hypo_params:
                 # Handle user-supplied hypothetical numbers deterministically
                 market_grounding_lines.append(format_hypothetical_trade_grounding(hypo_params))
 
@@ -239,7 +244,15 @@ async def dispatch_telegram_update(
                 except Exception as e:
                     logger.error(f"Error persisting conversation messages: {e}")
 
-        except Exception as e:
-            logger.error(f"Error processing text message: {e}")
-            await telegram_client.send_message(chat_id, FALLBACK_ERROR_TEXT, parse_mode="")
-        return
+        else:
+            # Non-text / unsupported message types (stickers, documents, audio)
+            await telegram_client.send_message(chat_id, UNSUPPORTED_MESSAGE_TEXT, parse_mode="")
+
+    except Exception as e:
+        logger.error(f"Unhandled error in dispatch_telegram_update: {e}")
+        try:
+            chat_id = update.get("message", {}).get("chat", {}).get("id")
+            if chat_id:
+                await telegram_client.send_message(chat_id, FALLBACK_ERROR_TEXT, parse_mode="")
+        except Exception:
+            pass

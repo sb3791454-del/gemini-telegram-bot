@@ -60,7 +60,7 @@ TIMEFRAME_PATTERNS = [
 ]
 
 TA_INTENT_PATTERNS = [
-    r"\b(?:chart|charts|technical|ta|analyze|analysis|trend|structure|support|resistance|breakout|breakdown|overbought|oversold|setup|confirmation|candlestick|candle|candles|kline|klines|bullish|bearish|long|short|pullback|retest|entry|invalidation|moving\s+average|moving\s+averages|timeframe|timeframes|time\s+frame|time\s+frames|rsi|ema|sma|bollinger|bb|atr|indicator|indicators|best\s+trade|trade\s+setup|trade\s+plan|trade)\b",
+    r"\b(?:chart|charts|technical|ta|analyze|analysis|trend|structure|support|resistance|breakout|breakdown|overbought|oversold|setup|confirmation|candlestick|candle|candles|kline|klines|bullish|bearish|long|short|pullback|retest|entry|invalidation|moving\s+average|moving\s+averages|timeframe|timeframes|time\s+frame|time\s+frames|rsi|ema|sma|bollinger|bb|atr|indicator|indicators|best\s+trade|trade\s+setup|trade\s+plan|trade|position)\b",
     r"تجزیہ|چارٹ|رجحان|سپورٹ|مزاحمت|انڈیکیٹر|کینڈل|لونگ|شارٹ|بریک آؤٹ|پل بیک|ٹریڈ"
 ]
 
@@ -70,50 +70,62 @@ def get_current_utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def extract_keywords(text: str) -> set:
-    """Extracts alphanumeric words from text excluding stop words."""
+def extract_keywords(text: str) -> List[str]:
+    """Extracts non-stopword tokens from query for simple keyword matching."""
     if not text:
-        return set()
-    words = re.findall(r"\b[\w\u0600-\u06FF]+\b", text.lower())
-    return {w for w in words if len(w) > 2 and w not in STOP_WORDS}
+        return []
+    words = re.findall(r"\w+", text.lower())
+    return [w for w in words if w not in STOP_WORDS and len(w) > 1]
 
 
 def extract_crypto_symbols(text: str, max_symbols: int = 2) -> List[str]:
-    """Detects cryptocurrency symbols or coin names in user messages."""
+    """Deterministically extracts cryptocurrency symbols from text with alias support."""
     if not text:
         return []
+
     found = []
-    tokens = re.findall(r"\b[a-zA-Z0-9_]+\b", text.upper())
-    for t in tokens:
-        if t in CRYPTO_ALIASES and CRYPTO_ALIASES[t] not in found:
-            found.append(CRYPTO_ALIASES[t])
-            if len(found) >= max_symbols:
-                break
-        elif t.endswith("USDT") and len(t) >= 6 and t not in found:
-            found.append(t)
-            if len(found) >= max_symbols:
-                break
-    return found
+    text_clean = text.upper()
+
+    # Exact slash/dash pairs e.g. BTC/USDT, ETH-USDT
+    pair_matches = re.findall(r"\b([A-Z0-9]{2,10})[/-](USDT|BUSD|USDC|BTC|ETH)\b", text_clean)
+    for base, quote in pair_matches:
+        sym = f"{base}{quote}"
+        if sym not in found:
+            found.append(sym)
+
+    # Standard symbols e.g. BTCUSDT, SOLUSDT
+    direct_matches = re.findall(r"\b([A-Z0-9]{2,10}(?:USDT|FDUSD|USDC|BUSD))\b", text_clean)
+    for sym in direct_matches:
+        if sym not in found:
+            found.append(sym)
+
+    # Aliases
+    words = re.findall(r"\b[A-Z0-9]+\b", text_clean)
+    for w in words:
+        if w in CRYPTO_ALIASES:
+            sym = CRYPTO_ALIASES[w]
+            if sym not in found:
+                found.append(sym)
+
+    return found[:max_symbols]
 
 
 def extract_timeframe(text: str) -> Optional[str]:
-    """Detects requested timeframe (15m, 1h, 4h, 1d, 1w) from natural language query."""
+    """Deterministically extracts timeframe from text, defaulting to None if unspecified."""
     if not text:
         return None
-    lower = text.lower()
-    for pattern, canonical in TIMEFRAME_PATTERNS:
-        if re.search(pattern, lower, re.IGNORECASE):
-            return canonical
+    for pattern, tf in TIMEFRAME_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return tf
     return None
 
 
 def has_technical_analysis_intent(text: str) -> bool:
-    """Detects whether user prompt seeks chart, indicator, trend, or market structure reasoning."""
+    """Detects whether user query requests technical analysis, charting, structure, or trading setups."""
     if not text:
         return False
-    lower = text.lower()
-    for pattern in TA_INTENT_PATTERNS:
-        if re.search(pattern, lower, re.IGNORECASE):
+    for pat in TA_INTENT_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
             return True
     return False
 
@@ -186,16 +198,16 @@ def extract_hypothetical_trade_params(text: str) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
-    # Structural Warning / Swing Level
-    m_sw = re.search(r"\b(?:structural\s*warning|swing\s*low|swing\s*high|structural\s*level|structural\s*invalidation|warning\s*level|warning)\s*(?:is|of|=|:)?\s*\$?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\b", text, re.IGNORECASE)
+    # Structural Warning / Swing Level / Invalidation
+    m_sw = re.search(r"\b(?:structural\s*(?:warning|invalidation|level|boundary|pivot|stop|sl)|swing\s*(?:low|high|point|level)|warning\s*level|warning)\s*(?:is|of|=|:)?\s*\$?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\b", text, re.IGNORECASE)
     if m_sw:
         try:
             res['structural_warning'] = float(m_sw.group(1).replace(',', ''))
         except Exception:
             pass
 
-    # Hard Stop / Stop Loss
-    m_sl = re.search(r"\b(?:hard\s*stop|hard\s*sl|stop\s*loss|stoploss|sl)\s*(?:is|of|=|:)?\s*\$?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\b", text, re.IGNORECASE)
+    # Hard Stop / Stop Loss (Negative lookbehind to prevent collision with structural stop)
+    m_sl = re.search(r"(?<!\bstructural\s)(?<!\bswing\s)\b(?:hard\s*stop|hard\s*sl|execution\s*stop|physical\s*stop|stop\s*loss|stoploss|\bsl\b|\bstop\b)\s*(?:is|of|=|:)?\s*\$?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)\b", text, re.IGNORECASE)
     if m_sl:
         try:
             res['hard_stop'] = float(m_sl.group(1).replace(',', ''))
@@ -253,6 +265,14 @@ def format_hypothetical_trade_grounding(params: Dict[str, Any]) -> str:
     if atr is not None:
         lines.append(f"• ATR Volatility Buffer: ${atr:,.2f} (System Deterministic Buffer Multiplier k = {DEFAULT_ATR_MULTIPLIER})")
 
+    # Invariant: Structural Warning and Hard SL must never be identical
+    if sw is not None and hard_sl is not None and sw == hard_sl:
+        if atr is not None:
+            hard_sl = calculate_hard_stop(sw, atr, direction=direction, k=DEFAULT_ATR_MULTIPLIER)
+            lines.append(f"• Invariant Enforcement: Structural Warning (${sw:,.2f}) and Hard Stop cannot be identical. Hard Stop recalculation applied: ${hard_sl:,.2f} ({DEFAULT_ATR_MULTIPLIER}x ATR buffer).")
+        else:
+            hard_sl = None
+
     # Evaluate Hard Stop-Loss deterministically
     if hard_sl is not None:
         lines.append(f"• Proposed Hard Stop-Loss: ${hard_sl:,.2f} (Explicitly Provided)")
@@ -264,12 +284,20 @@ def format_hypothetical_trade_grounding(params: Dict[str, Any]) -> str:
         lines.append(f"• Structural Distinction: Structural Warning (${sw:,.2f}) != Hard Stop Loss (${hard_sl:,.2f})")
     elif sw is not None and atr is None:
         lines.append(f"• ⚠️ INSUFFICIENT DATA FOR HARD STOP: Structural Warning (${sw:,.2f}) is NOT the Hard Stop Loss.")
-        lines.append(f"  Hard Stop requires an ATR volatility buffer (Hard SL = Structural Warning - {DEFAULT_ATR_MULTIPLIER}x ATR for Long).")
+        lines.append(f"  Hard Stop requires an ATR volatility buffer (Hard SL = Structural Warning - {DEFAULT_ATR_MULTIPLIER}x ATR for Long; Structural Warning + {DEFAULT_ATR_MULTIPLIER}x ATR for Short).")
         lines.append("  Without ATR or an explicit Hard Stop, exact Hard SL, position size, and Take-Profit levels cannot be computed.")
         lines.append("  Gemini MUST explicitly explain this missing dependency rather than inventing a stop-loss.")
         return "\n".join(lines)
 
     if entry is not None and hard_sl is not None:
+        # Validate geometry
+        if direction == "LONG" and hard_sl >= entry:
+            lines.append(f"• ⚠️ INVALID GEOMETRY: For a LONG position, Hard Stop-Loss (${hard_sl:,.2f}) must be strictly below Entry price (${entry:,.2f}).")
+            return "\n".join(lines)
+        if direction == "SHORT" and hard_sl <= entry:
+            lines.append(f"• ⚠️ INVALID GEOMETRY: For a SHORT position, Hard Stop-Loss (${hard_sl:,.2f}) must be strictly above Entry price (${entry:,.2f}).")
+            return "\n".join(lines)
+
         risk_per_unit = abs(entry - hard_sl)
         risk_pct_price = (risk_per_unit / entry * 100.0) if entry > 0 else 0.0
         lines.append(f"• Exact Risk Per Unit: ${risk_per_unit:,.2f} ({risk_pct_price:.2f}% price distance)")
@@ -297,8 +325,10 @@ def format_hypothetical_trade_grounding(params: Dict[str, Any]) -> str:
                 lines.append(f"  - Effective Leverage: {r_res.effective_leverage:.2f}x")
             except Exception as e:
                 lines.append(f"• Position Sizing Error: {e}")
-        elif cap is not None or risk_pct is not None:
-            lines.append("• Sizing Note: Both Capital and Risk% are required for exact position sizing.")
+        elif cap is not None and risk_pct is None:
+            lines.append(f"• Position Sizing Note: Capital is ${cap:,.2f}, but Risk Percentage (%) was not specified. Standard risk is 1.0% - 2.0% of capital.")
+        elif cap is None and risk_pct is not None:
+            lines.append(f"• Position Sizing Note: Risk percentage is {risk_pct:.1f}%, but Account Capital ($) was not provided. Ask user for capital to compute exact coin position size.")
 
     return "\n".join(lines)
 
@@ -448,50 +478,35 @@ def format_market_state_grounding(
                 setup_lines.append(f"  - Risk Per Unit: ${abs(setup.entry_reference_price - setup.suggested_sl_level):,.2f}")
             except Exception as e:
                 setup_lines.append(f"• Position Sizing Error: {e}")
-        else:
-            setup_lines.append(f"• Position Sizing Status: Sizing is NOT applicable because setup state is {setup.setup_state} (no executable trade setup).")
-    else:
-        setup_lines.append("• Risk Execution Policy: Exact dollar risk and position sizing require user-specified capital and risk percentage via /risk or by specifying 'I have $X capital and risk Y%'.")
+    elif user_capital is not None and user_risk_pct is None:
+        setup_lines.append(f"• Position Sizing Note: Capital is ${user_capital:,.2f}, but Risk Percentage (%) was not specified. Standard risk is 1.0% - 2.0% of capital.")
+    elif user_capital is None and user_risk_pct is not None:
+        setup_lines.append(f"• Position Sizing Note: Risk percentage is {user_risk_pct:.1f}%, but Account Capital ($) was not provided. Ask user for capital to compute exact coin position size and dollar exposure.")
 
     sections.append("\n".join(setup_lines))
-
     return "\n\n".join(sections)
 
 
-def select_relevant_memories(
-    query: str,
-    memories: List[Dict[str, Any]],
-    max_memories: int = 5
-) -> List[Dict[str, Any]]:
-    """
-    Selects top relevant memories based on lightweight keyword token overlap.
-    Runs entirely in pure Python with zero external API calls or vector databases.
-    """
-    if not query or not memories:
+def select_relevant_memories(query: str, memories: List[Dict[str, Any]], max_memories: int = 5) -> List[Dict[str, Any]]:
+    """Scores memories by word-overlap relevance and returns top matches."""
+    if not memories:
         return []
+    keywords = extract_keywords(query)
+    if not keywords:
+        return memories[:max_memories]
 
-    query_tokens = extract_keywords(query)
-    if not query_tokens:
-        return []
-
-    scored_memories = []
+    scored = []
     for mem in memories:
-        content = mem.get("content", "")
-        mem_tokens = extract_keywords(content)
-        overlap = query_tokens.intersection(mem_tokens)
-        
-        if not overlap:
-            continue
+        text = mem.get("content", "").lower()
+        score = sum(1 for kw in keywords if kw in text)
+        if score > 0:
+            scored.append((score, mem))
 
-        score = float(len(overlap))
-        mtype = mem.get("memory_type", "fact").lower()
-        if mtype in ("goal", "preference", "instruction"):
-            score += 0.5
-
-        scored_memories.append((score, mem))
-
-    scored_memories.sort(key=lambda x: (x[0], x[1].get("id", 0)), reverse=True)
-    return [item[1] for item in scored_memories[:max_memories]]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = [m for _, m in scored[:max_memories]]
+    if not results:
+        results = memories[:max_memories]
+    return results
 
 
 def format_prompt_with_context(
@@ -501,109 +516,103 @@ def format_prompt_with_context(
     current_utc_time: Optional[str] = None,
     market_grounding_text: Optional[str] = None,
 ) -> str:
-    """
-    Combines system prompt constitution, verified market grounding, user memories,
-    and recent session history into a single structured prompt payload for Gemini.
-    """
-    now_str = current_utc_time or get_current_utc_iso()
-    sections = [
-        f"[SYSTEM CONSTITUTION & INSTRUCTIONS]\n{TRADING_SYSTEM_INSTRUCTIONS}",
-        f"[TEMPORAL GROUNDING]\nCurrent UTC Time: {now_str}"
-    ]
+    """Combines user query, memories, conversation history, and live market grounding into a clean prompt."""
+    parts = []
+
+    if current_utc_time is None:
+        current_utc_time = get_current_utc_iso()
+
+    header = f"=== CONTEXT & TIME ===\nCurrent UTC Time: {current_utc_time}\n"
+    parts.append(header)
 
     if market_grounding_text:
-        sections.append(
-            "[LIVE VERIFIED MARKET GROUNDING — STRICT REAL-TIME DATA]\n"
-            "The following verified live market data, deterministic technical indicators, market structure, setup evaluations, and risk calculations were computed directly by the deterministic engine at this exact moment.\n"
-            "You MUST treat these numbers, indicator calculations, structural classifications, position sizes, and Take-Profit targets as immutable ground truth.\n"
-            "Never recalculate, invent, or contradict these figures. Ground your analysis, explanations, and risk advice directly in these facts.\n\n"
-            f"{market_grounding_text}"
-        )
+        parts.append(f"=== LIVE MARKET DATA & DETERMINISTIC CALCULATIONS ===\n{market_grounding_text}\n")
 
     if relevant_memories:
-        mem_lines = []
-        for mem in relevant_memories:
-            mtype = mem.get("memory_type", "Fact").capitalize()
-            content = mem.get("content", "").strip()
-            mem_lines.append(f"- {mtype}: {content}")
-        if mem_lines:
-            sections.append(
-                "[LONG-TERM MEMORY — USER PROVIDED CONTEXT]\n" + "\n".join(mem_lines)
-            )
+        mem_lines = ["=== RELEVANT USER MEMORIES ==="]
+        for m in relevant_memories:
+            c = m.get("content", "")
+            t = m.get("created_at", "")
+            mem_lines.append(f"- [{t}] {c}")
+        parts.append("\n".join(mem_lines) + "\n")
 
     if conversation_history:
-        history_lines = []
-        for msg in conversation_history:
-            role = msg.get("role", "user").upper()
-            content = msg.get("content", "").strip()
-            if role == "USER":
-                history_lines.append(f"USER: {content}")
-            else:
-                history_lines.append(f"ASSISTANT: {content}")
-        if history_lines:
-            sections.append(
-                "[RECENT CONVERSATION HISTORY]\n" + "\n".join(history_lines)
-            )
+        hist_lines = ["=== RECENT CONVERSATION HISTORY ==="]
+        for h in conversation_history:
+            role = h.get("role", "user").capitalize()
+            content = h.get("content", "")
+            hist_lines.append(f"{role}: {content}")
+        parts.append("\n".join(hist_lines) + "\n")
 
-    sections.append(f"[CURRENT USER MESSAGE]\n{user_query}")
-    return "\n\n".join(sections)
+    parts.append(f"=== USER QUERY ===\n{user_query}")
+    return "\n".join(parts)
 
 
 def format_prompt_with_memories(user_query: str, relevant_memories: List[Dict[str, Any]]) -> str:
-    """Helper method for backwards compatibility."""
-    return format_prompt_with_context(user_query, relevant_memories=relevant_memories, conversation_history=None)
+    """Backwards-compatible wrapper."""
+    return format_prompt_with_context(user_query, relevant_memories=relevant_memories)
 
 
 def build_text_payload(prompt: str) -> Dict[str, Any]:
-    """Formats payload for Gemini text generation endpoint."""
+    """Builds standard text payload for Gemini REST API with system instructions."""
     return {
+        "system_instruction": {
+            "parts": [{"text": TRADING_SYSTEM_INSTRUCTIONS}]
+        },
         "contents": [
             {
-                "parts": [
-                    {"text": prompt}
-                ]
+                "role": "user",
+                "parts": [{"text": prompt}]
             }
-        ]
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 2048,
+            "topP": 0.8
+        }
     }
 
 
-def format_vision_caption(
-    caption: Optional[str] = None,
-    current_utc_time: Optional[str] = None
-) -> str:
-    """Builds instructions and temporal context for image/chart vision analysis."""
-    now_str = current_utc_time or get_current_utc_iso()
-    user_caption = caption.strip() if caption else DEFAULT_VISION_PROMPT
-    return (
-        f"[SYSTEM CONSTITUTION & INSTRUCTIONS]\n{TRADING_SYSTEM_INSTRUCTIONS}\n\n"
-        f"[TEMPORAL GROUNDING]\nCurrent UTC Time: {now_str}\n\n"
-        f"[IMAGE ANALYSIS REQUEST]\n{user_caption}"
-    )
+def format_vision_caption(caption: Optional[str], current_utc_time: str) -> str:
+    """Formats image analysis prompt caption."""
+    base = caption.strip() if caption else DEFAULT_VISION_PROMPT
+    return f"=== CONTEXT ===\nCurrent UTC Time: {current_utc_time}\n\nUser Request: {base}"
 
 
 def build_vision_payload(
     image_bytes: bytes,
     caption: Optional[str] = None,
     mime_type: str = "image/jpeg",
-    current_utc_time: Optional[str] = None
+    current_utc_time: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Encodes image bytes as base64 and bundles with prompt instructions."""
-    b64_image = base64.b64encode(image_bytes).decode("utf-8")
-    effective_caption = format_vision_caption(caption, current_utc_time)
+    """Builds multimodal payload for Gemini Vision REST API."""
+    if current_utc_time is None:
+        current_utc_time = get_current_utc_iso()
+
+    prompt_text = format_vision_caption(caption, current_utc_time)
+    b64_data = base64.b64encode(image_bytes).decode("utf-8")
+
     return {
+        "system_instruction": {
+            "parts": [{"text": TRADING_SYSTEM_INSTRUCTIONS}]
+        },
         "contents": [
             {
+                "role": "user",
                 "parts": [
+                    {"text": prompt_text},
                     {
                         "inline_data": {
                             "mime_type": mime_type,
-                            "data": b64_image
+                            "data": b64_data
                         }
-                    },
-                    {
-                        "text": effective_caption
                     }
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 2048,
+            "topP": 0.8
+        }
     }
