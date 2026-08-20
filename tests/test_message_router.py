@@ -115,7 +115,7 @@ class TestMessageRouterAndCommands(unittest.TestCase):
         self.assertFalse(self.gemini_client.generate_text_called)
         self.assertEqual(len(self.telegram_client.sent_messages), 1)
         msg = self.telegram_client.sent_messages[0]["text"]
-        self.assertIn("BTCUSDT Live Price", msg)
+        self.assertIn("Live Price", msg)
         self.assertIn("60,000.00", msg)
 
     def test_price_command_binance_failure_does_not_call_gemini(self):

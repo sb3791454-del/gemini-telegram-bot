@@ -12,6 +12,7 @@ from ai.prompts_builder import (
     extract_crypto_symbols,
     extract_timeframe,
     has_technical_analysis_intent,
+    format_market_state_grounding,
     format_prompt_with_context,
 )
 from router.command_router import handle_command
@@ -146,7 +147,7 @@ async def dispatch_telegram_update(
                 except Exception as e:
                     logger.error(f"Error selecting relevant memories: {e}")
 
-            # Step 5c: Automated Live Market Grounding & Timeframe-Aware Technical Analysis
+            # Step 5c: Automated Live Market Grounding & Deterministic Market Reasoning Engine
             detected_symbols = extract_crypto_symbols(text, max_symbols=2)
             if detected_symbols and binance_client:
                 timeframe = extract_timeframe(text)
@@ -154,44 +155,44 @@ async def dispatch_telegram_update(
                 target_tf = timeframe or "1h"
 
                 for sym in detected_symbols:
-                    try:
-                        ticker_data = await binance_client.get_24h_ticker(sym)
-                        change_sign = "+" if ticker_data.price_change >= 0 else ""
-                        ticker_line = (
-                            f"Asset: {ticker_data.symbol} | Verified Spot Price: ${ticker_data.last_price:,.2f} | "
-                            f"24h Change: {change_sign}{ticker_data.price_change_percent:.2f}% | "
-                            f"24h High: ${ticker_data.high_price:,.2f} | 24h Low: ${ticker_data.low_price:,.2f} | "
-                            f"24h Volume (USD): ${ticker_data.quote_volume:,.2f} | "
-                            f"Source: {ticker_data.source} (UTC: {ticker_data.timestamp})"
-                        )
-
-                        if wants_ta:
+                    if wants_ta:
+                        try:
+                            market_state = await binance_client.get_market_state(
+                                sym,
+                                primary_timeframe=target_tf,
+                                include_mtf=True
+                            )
+                            market_grounding_lines.append(format_market_state_grounding(market_state))
+                        except Exception as e:
+                            logger.warning(f"Could not compute full market state for {sym} ({target_tf}): {e}")
+                            # Fallback to 24h ticker if klines fail
                             try:
-                                ta = await binance_client.get_technical_analysis(sym, timeframe=target_tf)
-                                ema_parts = [f"EMA 20: ${ta.ema_20:,.2f}", f"EMA 50: ${ta.ema_50:,.2f}"]
-                                if ta.ema_200:
-                                    ema_parts.append(f"EMA 200: ${ta.ema_200:,.2f}")
-                                ema_str = " | ".join(ema_parts)
-
-                                ta_lines = [
-                                    f"• Deterministic Technical Analysis ({ta.symbol} - {ta.timeframe.upper()} Timeframe):",
-                                    f"  - Verified Price: ${ta.current_price:,.2f}",
-                                    f"  - Trend Structure: {ta.trend}",
-                                    f"  - RSI (14, Wilder Smoothed): {ta.rsi_14:.1f} [{ta.rsi_condition}]",
-                                    f"  - Moving Averages: {ema_str}",
-                                    f"  - Bollinger Bands (20, 2σ): Upper: ${ta.bb_upper:,.2f} | Middle (SMA 20): ${ta.bb_middle:,.2f} | Lower: ${ta.bb_lower:,.2f} | Bandwidth: {ta.bb_bandwidth_pct:.2f}%",
-                                    f"  - Volatility & Risk: ATR-14: ${ta.atr_14:,.2f} | Recommended Dynamic SL Buffer (1.5x ATR): ${ta.suggested_sl_distance:,.2f}",
-                                    f"  - Key Lookback Levels: Resistance: ${ta.resistance_level:,.2f} | Support: ${ta.support_level:,.2f}",
-                                    f"  - Candlestick Data Source: {ta.source} (UTC: {ta.timestamp})",
-                                ]
-                                market_grounding_lines.append(ticker_line + "\n" + "\n".join(ta_lines))
-                            except Exception as e:
-                                logger.warning(f"Could not compute technical analysis for {sym} ({target_tf}): {e}")
+                                ticker_data = await binance_client.get_24h_ticker(sym)
+                                change_sign = "+" if ticker_data.price_change >= 0 else ""
+                                ticker_line = (
+                                    f"Asset: {ticker_data.symbol} | Verified Spot Price: ${ticker_data.last_price:,.2f} | "
+                                    f"24h Change: {change_sign}{ticker_data.price_change_percent:.2f}% | "
+                                    f"24h High: ${ticker_data.high_price:,.2f} | 24h Low: ${ticker_data.low_price:,.2f} | "
+                                    f"24h Volume (USD): ${ticker_data.quote_volume:,.2f} | "
+                                    f"Source: {ticker_data.source} (UTC: {ticker_data.timestamp})"
+                                )
                                 market_grounding_lines.append(ticker_line)
-                        else:
+                            except Exception as ex:
+                                logger.warning(f"Could not ground symbol {sym} on fallback: {ex}")
+                    else:
+                        try:
+                            ticker_data = await binance_client.get_24h_ticker(sym)
+                            change_sign = "+" if ticker_data.price_change >= 0 else ""
+                            ticker_line = (
+                                f"Asset: {ticker_data.symbol} | Verified Spot Price: ${ticker_data.last_price:,.2f} | "
+                                f"24h Change: {change_sign}{ticker_data.price_change_percent:.2f}% | "
+                                f"24h High: ${ticker_data.high_price:,.2f} | 24h Low: ${ticker_data.low_price:,.2f} | "
+                                f"24h Volume (USD): ${ticker_data.quote_volume:,.2f} | "
+                                f"Source: {ticker_data.source} (UTC: {ticker_data.timestamp})"
+                            )
                             market_grounding_lines.append(ticker_line)
-                    except Exception as e:
-                        logger.warning(f"Could not ground symbol {sym}: {e}")
+                        except Exception as e:
+                            logger.warning(f"Could not ground symbol {sym}: {e}")
 
             market_grounding_text = "\n\n".join(market_grounding_lines) if market_grounding_lines else None
 

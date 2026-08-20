@@ -6,14 +6,19 @@ with strict error sanitization and zero upstream HTML leakage.
 
 import json
 import logging
+import asyncio
 from datetime import datetime, timezone
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 from trading.models import (
     PriceTicker,
     Ticker24h,
     OrderBookDepth,
     Candle,
     TechnicalAnalysisSummary,
+    MarketStructureSummary,
+    MultiTimeframeSummary,
+    TradeSetupEvaluation,
+    MarketState,
 )
 
 logger = logging.getLogger("worker.trading.market")
@@ -87,13 +92,13 @@ class BinanceClient:
     def normalize_symbol(raw_symbol: str) -> str:
         """
         Normalizes and strictly validates cryptocurrency trading pair symbols.
-        Converts to uppercase alphanumeric. Appends 'USDT' if single coin ticker (e.g. 'BTC' -> 'BTCUSDT').
+        Converts to uppercase alphanumeric. Appends USDT if single coin ticker (e.g. BTC -> BTCUSDT).
         """
         cleaned = raw_symbol.strip().upper().replace("/", "").replace("-", "").replace("_", "")
         if not cleaned.isalnum():
-            raise ValueError(f"Invalid symbol '{raw_symbol}': Symbol must contain only alphanumeric characters.")
+            raise ValueError(f"Invalid symbol {raw_symbol}: Symbol must contain only alphanumeric characters.")
         if len(cleaned) < 2 or len(cleaned) > 20:
-            raise ValueError(f"Invalid symbol '{raw_symbol}': Symbol length must be between 2 and 20 characters.")
+            raise ValueError(f"Invalid symbol {raw_symbol}: Symbol length must be between 2 and 20 characters.")
         
         if cleaned == "USDT":
             return "USDT"
@@ -175,8 +180,7 @@ class BinanceClient:
             bybit_url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={norm_symbol}"
             resp = await self._safe_fetch(bybit_url)
             if getattr(resp, "status", 200) == 200:
-                data = json.loads(await resp.text())
-                if data.get("retCode") == 0:
+                data = json.loads(await resp.text())\n                if data.get("retCode") == 0:
                     items = data.get("result", {}).get("list", [])
                     if items and "lastPrice" in items[0]:
                         return PriceTicker(
@@ -631,6 +635,7 @@ class BinanceClient:
                 if data.get("retCode") == 0 and "result" in data:
                     raw_list = data["result"].get("list", [])
                     if raw_list:
+                        # Bybit returns newest first, so reverse to chronological order
                         candles = []
                         for k in reversed(raw_list):
                             candles.append(Candle(
@@ -650,7 +655,7 @@ class BinanceClient:
         try:
             base_coin, quote_coin = self._split_base_quote(norm_symbol)
             okx_inst = f"{base_coin}-{quote_coin}"
-            okx_bars = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
+            okx_bars = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "D", "1w": "W"}
             o_bar = okx_bars.get(interval, "1H")
             okx_url = f"https://www.okx.com/api/v5/market/candles?instId={okx_inst}&bar={o_bar}&limit={limit}"
             resp = await self._safe_fetch(okx_url)
@@ -695,4 +700,113 @@ class BinanceClient:
             candles,
             now_iso,
             source=source_name
+        )
+
+    async def get_market_state(
+        self,
+        symbol: str,
+        primary_timeframe: str = "1h",
+        include_mtf: bool = True
+    ) -> MarketState:
+        """
+        Fetches full market state including spot ticker, primary timeframe indicators,
+        deterministic market structure, multi-timeframe confirmation, and trade setup evaluation.
+        """
+        import asyncio
+        norm_symbol = self.normalize_symbol(symbol)
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        from trading.technical_analysis import (
+            evaluate_market_structure,
+            analyze_market_structure,
+            determine_mtf_alignment,
+            evaluate_deterministic_setup,
+        )
+
+        # 1. Fetch 24h ticker (graceful fallback)
+        ticker_24h = None
+        try:
+            ticker_24h = await self.get_24h_ticker(norm_symbol)
+        except Exception as e:
+            logger.warning(f"Could not fetch 24h ticker for market state {norm_symbol}: {e}")
+
+        # 2. Fetch primary timeframe klines
+        candles = await self.get_klines(norm_symbol, interval=primary_timeframe, limit=50)
+        if not candles:
+            raise BinanceAPIError(f"No candlestick data available for {norm_symbol} ({primary_timeframe}).")
+
+        source_name = "Binance Klines"
+        primary_ta = evaluate_market_structure(
+            norm_symbol,
+            primary_timeframe,
+            candles,
+            now_iso,
+            source=source_name
+        )
+
+        market_structure = analyze_market_structure(
+            norm_symbol,
+            primary_timeframe,
+            candles,
+            lookback_window=30
+        )
+
+        # 3. Multi-timeframe confirmation
+        multi_timeframe = None
+        if include_mtf:
+            if primary_timeframe == "1h":
+                aux_tfs = ["4h", "1d"]
+            elif primary_timeframe == "15m":
+                aux_tfs = ["1h", "4h"]
+            elif primary_timeframe == "4h":
+                aux_tfs = ["1d", "1w"]
+            elif primary_timeframe == "1d":
+                aux_tfs = ["4h", "1w"]
+            elif primary_timeframe == "1w":
+                aux_tfs = ["1d", "4h"]
+            else:
+                aux_tfs = ["4h", "1d"]
+
+            tf_ta_map = {primary_timeframe: primary_ta}
+
+            async def fetch_aux(tf: str):
+                try:
+                    c = await self.get_klines(norm_symbol, interval=tf, limit=50)
+                    if c:
+                        return tf, evaluate_market_structure(norm_symbol, tf, c, now_iso, source=source_name)
+                except Exception as ex:
+                    logger.warning(f"Could not fetch auxiliary MTF {tf} for {norm_symbol}: {ex}")
+                return tf, None
+
+            aux_tasks = [fetch_aux(tf) for tf in aux_tfs]
+            aux_results = await asyncio.gather(*aux_tasks, return_exceptions=True)
+            for res in aux_results:
+                if isinstance(res, tuple) and len(res) == 2 and res[1] is not None:
+                    tf_ta_map[res[0]] = res[1]
+
+            multi_timeframe = determine_mtf_alignment(primary_timeframe, tf_ta_map)
+
+        # 4. Deterministic Trade Setup Evaluation
+        trade_setup = evaluate_deterministic_setup(
+            norm_symbol,
+            primary_timeframe,
+            candles,
+            primary_ta,
+            market_structure,
+            mtf_summary=multi_timeframe
+        )
+
+        current_price = primary_ta.current_price
+
+        return MarketState(
+            symbol=norm_symbol,
+            primary_timeframe=primary_timeframe,
+            current_price=current_price,
+            timestamp=now_iso,
+            source=source_name,
+            ticker_24h=ticker_24h,
+            primary_ta=primary_ta,
+            market_structure=market_structure,
+            multi_timeframe=multi_timeframe,
+            trade_setup=trade_setup
         )

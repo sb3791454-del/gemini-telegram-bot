@@ -1,10 +1,11 @@
-"""Payload builders, relevance scoring, and context formatters for Gemini API with live market grounding."""
+"""Payload builders, relevance scoring, and context formatters for Gemini API with structured market reasoning."""
 
 import re
 import base64
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from config.prompts import TRADING_SYSTEM_INSTRUCTIONS, DEFAULT_VISION_PROMPT
+from trading.models import MarketState
 
 # Common stop words in English and Roman/Urdu to filter out for keyword matching
 STOP_WORDS = {
@@ -66,8 +67,8 @@ TIMEFRAME_PATTERNS = [
 ]
 
 TA_INTENT_PATTERNS = [
-    r"\b(?:chart|charts|technical|ta|analyze|analysis|trend|structure|support|resistance|breakout|overbought|oversold|setup|confirmation|candlestick|candle|candles|kline|klines|bullish|bearish|moving\s+average|moving\s+averages|timeframe|timeframes|time\s+frame|time\s+frames|rsi|ema|sma|bollinger|bb|atr|indicator|indicators)\b",
-    r"تجزیہ|چارٹ|رجحان|سپورٹ|مزاحمت|انڈیکیٹر|کینڈل"
+    r"\b(?:chart|charts|technical|ta|analyze|analysis|trend|structure|support|resistance|breakout|breakdown|overbought|oversold|setup|confirmation|candlestick|candle|candles|kline|klines|bullish|bearish|long|short|pullback|retest|entry|invalidation|moving\s+average|moving\s+averages|timeframe|timeframes|time\s+frame|time\s+frames|rsi|ema|sma|bollinger|bb|atr|indicator|indicators)\b",
+    r"تجزیہ|چارٹ|رجحان|سپورٹ|مزاحمت|انڈیکیٹر|کینڈل|لونگ|شارٹ|بریک آؤٹ|پل بیک"
 ]
 
 
@@ -123,7 +124,7 @@ def extract_timeframe(text: str) -> Optional[str]:
 
 def has_technical_analysis_intent(text: str) -> bool:
     """
-    Determines whether a message is seeking technical analysis or indicator evaluation.
+    Determines whether a message is seeking technical analysis, chart breakdown, or trade setup evaluation.
     """
     if not text:
         return False
@@ -132,6 +133,112 @@ def has_technical_analysis_intent(text: str) -> bool:
         if re.search(pattern, lower, re.IGNORECASE):
             return True
     return False
+
+
+def format_market_state_grounding(state: MarketState) -> str:
+    """
+    Constructs the standardized structured market grounding contract for Gemini context.
+    Strictly separates factual data, market structure, indicators, MTF alignment, and deterministic setup.
+    """
+    ta = state.primary_ta
+    ms = state.market_structure
+    mtf = state.multi_timeframe
+    setup = state.trade_setup
+    ticker = state.ticker_24h
+
+    sections = []
+
+    # 1. LIVE MARKET FACTS
+    price_str = f"${state.current_price:,.2f}" if state.current_price >= 1.0 else f"${state.current_price:.6f}"
+    facts_lines = [
+        "=== [LIVE MARKET FACTS] ===",
+        f"• Symbol: {state.symbol}",
+        f"• Verified Current Price: {price_str}",
+        f"• Primary Timeframe: {state.primary_timeframe.upper()}",
+        f"• Data Feed Source: {state.source}",
+        f"• Feed Timestamp (UTC): {state.timestamp}"
+    ]
+    if ticker:
+        sign = "+" if ticker.price_change >= 0 else ""
+        facts_lines.extend([
+            f"• 24h Rolling Change: {sign}{ticker.price_change_percent:.2f}% (${sign}{ticker.price_change:,.2f})",
+            f"• 24h High: ${ticker.high_price:,.2f} | 24h Low: ${ticker.low_price:,.2f}",
+            f"• 24h Volume (USD): ${ticker.quote_volume:,.2f}"
+        ])
+    sections.append("\n".join(facts_lines))
+
+    # 2. MARKET STRUCTURE
+    struct_lines = [
+        f"=== [MARKET STRUCTURE — {state.primary_timeframe.upper()}] ===",
+        f"• Market Structure Type: {ms.structure_type}",
+        f"• Primary Trend: {ms.trend} (Strength: {ms.trend_strength})",
+        f"• Recent Swing High: ${ms.recent_swing_high:,.2f} | Recent Swing Low: ${ms.recent_swing_low:,.2f}",
+        f"• Trailing Lookback Extremes: Resistance: ${ms.resistance_level:,.2f} | Support: ${ms.support_level:,.2f}",
+        f"• Key Support Zone: ${ms.support_zone[0]:,.2f} - ${ms.support_zone[1]:,.2f}",
+        f"• Key Resistance Zone: ${ms.resistance_zone[0]:,.2f} - ${ms.resistance_zone[1]:,.2f}",
+        f"• Swing Sequence: Higher Highs: {ms.higher_highs_count} | Higher Lows: {ms.higher_lows_count} | Lower Highs: {ms.lower_highs_count} | Lower Lows: {ms.lower_lows_count}"
+    ]
+    sections.append("\n".join(struct_lines))
+
+    # 3. MOMENTUM & MOVING AVERAGES
+    ema_200_str = f"${ta.ema_200:,.2f}" if ta.ema_200 else "N/A (insufficient candles)"
+    mom_lines = [
+        f"=== [MOMENTUM & MOVING AVERAGES — {state.primary_timeframe.upper()}] ===",
+        f"• RSI-14 (Wilder Smoothed): {ta.rsi_14:.1f} [{ta.rsi_condition}]",
+        f"• Moving Averages: EMA 20: ${ta.ema_20:,.2f} | EMA 50: ${ta.ema_50:,.2f} | EMA 200: {ema_200_str}",
+        f"• EMA Structural Alignment: {ta.ema_alignment}"
+    ]
+    sections.append("\n".join(mom_lines))
+
+    # 4. VOLATILITY, BANDS & VOLUME
+    vol_lines = [
+        f"=== [VOLATILITY, BOLLINGER BANDS & VOLUME — {state.primary_timeframe.upper()}] ===",
+        f"• ATR-14 (Wilder Volatility): ${ta.atr_14:,.2f} (Recommended 1.5x ATR SL Buffer: ${ta.suggested_sl_distance:,.2f})",
+        f"• Volatility State: {ta.volatility_state}",
+        f"• Bollinger Bands (20, 2σ): Upper: ${ta.bb_upper:,.2f} | Middle (SMA 20): ${ta.bb_middle:,.2f} | Lower: ${ta.bb_lower:,.2f}",
+        f"• Bollinger Bandwidth: {ta.bb_bandwidth_pct:.2f}% | Position (%b): {ta.bb_position_pct:.2f} [{ta.bb_state}]",
+        f"• Volume Metrics: Recent {ta.volume_recent:,.1f} vs 20-SMA {ta.volume_sma_20:,.1f} ({ta.volume_state})"
+    ]
+    sections.append("\n".join(vol_lines))
+
+    # 5. MULTI-TIMEFRAME CONFIRMATION
+    if mtf:
+        mtf_lines = [
+            "=== [MULTI-TIMEFRAME CONFIRMATION & ALIGNMENT] ===",
+            f"• Multi-Timeframe Alignment: {mtf.alignment_description}",
+            f"• Confluence Status: {mtf.alignment_status}",
+            f"• Signal Conflict Detected: {'YES (Conflicting signals present)' if mtf.has_conflict else 'NO (Timeframes aligned)'}"
+        ]
+        if mtf.conflict_details:
+            mtf_lines.append(f"• Conflict Breakdown: {mtf.conflict_details}")
+        sections.append("\n".join(mtf_lines))
+
+    # 6. DETERMINISTIC TRADE SETUP EVALUATION
+    setup_lines = [
+        "=== [DETERMINISTIC TRADE SETUP EVALUATION] ===",
+        f"• Setup State: {setup.setup_state}",
+        f"• Directional Bias: {setup.direction_bias} (Confidence: {setup.confidence})",
+        "• Deterministic Rationale:"
+    ]
+    for r in setup.reasons:
+        setup_lines.append(f"  - {r}")
+
+    if setup.suggested_entry_zone:
+        setup_lines.append(f"• Suggested Technical Entry Zone: ${setup.suggested_entry_zone[0]:,.2f} - ${setup.suggested_entry_zone[1]:,.2f}")
+    if setup.suggested_sl_level:
+        setup_lines.append(f"• Technical Stop-Loss Level: ${setup.suggested_sl_level:,.2f}")
+    if setup.suggested_tp_levels:
+        tp_strs = [f"${tp:,.2f}" for tp in setup.suggested_tp_levels]
+        setup_lines.append(f"• Calculated Take-Profit Targets: {', '.join(tp_strs)}")
+    if setup.invalidation_level:
+        setup_lines.append(f"• Setup Invalidation Level: ${setup.invalidation_level:,.2f} ({setup.invalidation_condition})")
+    if setup.key_risks:
+        setup_lines.append("• Key Identified Risks: " + ", ".join(setup.key_risks))
+
+    setup_lines.append("• Risk Execution Policy: Exact dollar risk and position sizing require user-specified capital and risk percentage via /risk.")
+    sections.append("\n".join(setup_lines))
+
+    return "\n\n".join(sections)
 
 
 def select_relevant_memories(
@@ -181,7 +288,7 @@ def format_prompt_with_context(
     Constructs the unified prompt with clearly separated sections:
     1. System constitution & operating instructions
     2. Temporal grounding (current UTC timestamp)
-    3. Verified live market & technical indicator grounding (if crypto query detected)
+    3. Verified live market, technical indicator & setup grounding (if crypto query detected)
     4. Long-term memories (user-provided background context)
     5. Recent conversation history (active session turns)
     6. Current user message
@@ -196,9 +303,9 @@ def format_prompt_with_context(
     if market_grounding_text:
         sections.append(
             "[LIVE VERIFIED MARKET GROUNDING — STRICT REAL-TIME DATA]\n"
-            "The following verified live market data and deterministic technical indicators were retrieved directly from exchange feeds at this exact moment.\n"
-            "You MUST treat these numbers, indicator calculations, and timeframe metrics as immutable ground truth. Never hallucinate, invent, or contradict these figures.\n"
-            "If the user asked for a specific timeframe (e.g. 15m, 1h, 4h, 1d, 1w), ground your answer in the verified technical indicators for that requested timeframe.\n\n"
+            "The following verified live market data, deterministic technical indicators, market structure, and setup evaluations were computed directly from exchange feeds at this exact moment.\n"
+            "You MUST treat these numbers, indicator calculations, structural classifications, and timeframe metrics as immutable ground truth.\n"
+            "Never hallucinate, invent, or contradict these figures. Ground your analysis, explanations, and risk advice directly in these facts.\n\n"
             f"{market_grounding_text}"
         )
 

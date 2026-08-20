@@ -52,16 +52,18 @@ def format_price_message(ticker: PriceTicker) -> str:
     """Formats a deterministic real-time price response."""
     price_val = ticker.price
     if price_val >= 1.0:
-        price_str = f"${price_val:,.2f}" if price_val >= 100 else f"${price_val:,.4f}"
+        price_str = f"{price_val:,.2f}" if price_val >= 100 else f"{price_val:,.4f}"
     else:
-        price_str = f"${price_val:.6f}".rstrip("0").rstrip(".")
+        price_str = f"{price_val:.8f}".rstrip("0").rstrip(".")
+        
+    source_name = getattr(ticker, "source", "Binance Spot")
+    timestamp = getattr(ticker, "timestamp", "N/A")
 
     lines = [
-        f"💰 *{ticker.symbol} Live Spot Price (لائیو ریٹ)*\n",
-        f"• *Price (USD):* `{price_str}`",
-        f"• *Data Source:* {ticker.source}",
-        f"• *UTC Time:* `{ticker.timestamp}`\n",
-        f"_کوئی فرضی یا تخمینی ویلیو نہیں ہے۔ یہ براہ راست لائیو ایکسچینج فیڈ ہے۔_"
+        f"📊 *{ticker.symbol} Live Price*",
+        f"• *Price:* `${price_str}`",
+        f"• *Source:* {source_name} (Verified)",
+        f"• *UTC Time:* `{timestamp}`",
     ]
     return "\n".join(lines)
 
@@ -109,11 +111,12 @@ def format_depth_message(d: OrderBookDepth) -> str:
 
 
 def format_ta_message(ta: TechnicalAnalysisSummary) -> str:
+    price_str = f"${ta.current_price:,.2f}" if ta.current_price >= 1.0 else f"${ta.current_price:.6f}"
     lines = [
         f"📊 *{ta.symbol} Technical Analysis ({ta.timeframe.upper()})*\n",
-        f"• *Current Price:* `${ta.current_price:,.2f}`",
-        f"• *Trend Structure:* *{ta.trend}*",
-        f"• *RSI (14):* `{ta.rsi_14:.1f}` — _{ta.rsi_condition}_\n",
+        f"• *Current Price:* `{price_str}`",
+        f"• *Primary Trend:* *{ta.trend}*",
+        f"• *RSI (14, Wilder):* `{ta.rsi_14:.1f}` — _{ta.rsi_condition}_\n",
         "*Exponential Moving Averages:*",
         f"  • *EMA 20:* `${ta.ema_20:,.2f}`",
         f"  • *EMA 50:* `${ta.ema_50:,.2f}`",
@@ -122,16 +125,18 @@ def format_ta_message(ta: TechnicalAnalysisSummary) -> str:
         lines.append(f"  • *EMA 200:* `${ta.ema_200:,.2f}`")
 
     lines.extend([
+        f"  • *EMA Alignment:* {ta.ema_alignment}",
         "\n*Bollinger Bands (20, 2σ):*",
         f"  • *Upper:* `${ta.bb_upper:,.2f}`",
         f"  • *Middle (SMA 20):* `${ta.bb_middle:,.2f}`",
         f"  • *Lower:* `${ta.bb_lower:,.2f}`",
-        f"  • *Bandwidth:* `{ta.bb_bandwidth_pct:.2f}%`\n",
-        "*Volatility & Structure:*",
-        f"  • *ATR (14):* `${ta.atr_14:,.2f}`",
-        f"  • *Recommended SL Buffer (1.5x ATR):* `${ta.suggested_sl_distance:,.2f}`",
+        f"  • *Bandwidth:* `{ta.bb_bandwidth_pct:.2f}%` — _{ta.bb_state}_\n",
+        "*Volatility & Support/Resistance:*",
+        f"  • *ATR (14):* `${ta.atr_14:,.2f}` ({ta.volatility_state})",
+        f"  • *Dynamic SL Buffer (1.5x ATR):* `${ta.suggested_sl_distance:,.2f}`",
         f"  • *Key Resistance (Lookback):* `${ta.resistance_level:,.2f}`",
-        f"  • *Key Support (Lookback):* `${ta.support_level:,.2f}`\n",
+        f"  • *Key Support (Lookback):* `${ta.support_level:,.2f}`",
+        f"  • *Volume:* {ta.volume_state}\n",
         f"• *Source:* {ta.source}\n• *UTC Time:* `{ta.timestamp}`"
     ])
     return "\n".join(lines)
@@ -286,7 +291,7 @@ async def handle_command(
             )
         return True
 
-    # 3b. /ta or /analyze <symbol> [timeframe] (PHASE 8)
+    # 3b. /ta or /analyze <symbol> [timeframe]
     if cmd in ("/ta", "/analyze"):
         if not args:
             msg = (
@@ -340,7 +345,7 @@ async def handle_command(
             )
         return True
 
-    # 3c. /risk or /calc <capital> <risk%> <entry> <stop_loss> (PHASE 8)
+    # 3c. /risk or /calc <capital> <risk%> <entry> <stop_loss>
     if cmd in ("/risk", "/calc"):
         parts = args.split()
         if len(parts) < 4:
@@ -477,7 +482,7 @@ async def handle_command(
             )
         return True
 
-    # --- 4. WATCHLIST COMMANDS (PHASE 8) ---
+    # --- 4. WATCHLIST COMMANDS ---
     if cmd == "/watch":
         if not args:
             msg = (
@@ -541,7 +546,7 @@ async def handle_command(
             if not items:
                 msg = (
                     "⭐ *آپ کی واچ لسٹ خالی ہے (Watchlist Empty)*\n\n"
-                    "کوئی بھی کوائن شامل کرنے کے لیے `/watch <symbol>` لکھیں (مثلاً: `/watch BTC` یا `/watch SOL`)۔"
+                    "کوئی بھی کوائن شامل کرنے کے لیے `/watch <symbol>` لکھیں (مثلاً: `/watch BTC` یا `/watch SOL`)。"
                 )
                 await telegram_client.send_message(chat_id, msg, parse_mode="Markdown")
                 return True
@@ -649,16 +654,6 @@ async def handle_command(
         await telegram_client.send_message(chat_id, "🗑️ *تمام مستقل یادداشتیں کامیابی کے ساتھ ڈیلیٹ کر دی گئی ہیں (All Memories Deleted).* ", parse_mode="Markdown")
         return True
 
-    if cmd == "/forgetall":
-        warn_msg = (
-            "⚠️ *انتباہ (Warning):*\n"
-            "اس عمل سے آپ کی تمام مستقل یادداشتیں ہمیشہ کے لیے ڈیلیٹ ہو جائیں گی۔\n\n"
-            "تصدیق کے لیے درج ذیل کمانڈ لکھیں:\n"
-            "`/forgetall_confirm`"
-        )
-        await telegram_client.send_message(chat_id, warn_msg, parse_mode="Markdown")
-        return True
-
     if cmd == "/forget":
         if not args or not args.isdigit():
             msg = (
@@ -700,7 +695,7 @@ async def handle_command(
                     f"• *D1 Database:* `Connected (Active)`\n"
                     f"• *صارف کا نام:* {profile.get('display_name') if profile else 'N/A'}\n"
                     f"• *Telegram ID:* `{user_id}`\n"
-                    f"• *محفوظ شدہ یادداشتیں (Memories):*\ `{mem_count}`\n"
+                    f"• *محفوظ شدہ یادداشتیں (Memories):* `{mem_count}`\n"
                     f"• *واچ لسٹ کوائنز (Watchlist):* `{wl_count}`\n"
                     f"• *کل پیغامات (Total Messages):* `{msg_count}`\n\n"
                     f"_یادداشتیں دیکھنے کے لیے `/memories` اور واچ لسٹ کے لیے `/watchlist` استعمال کریں۔_"

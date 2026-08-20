@@ -7,6 +7,7 @@ from ai.prompts_builder import (
     extract_crypto_symbols,
     extract_timeframe,
     has_technical_analysis_intent,
+    format_market_state_grounding,
     format_prompt_with_context,
     format_prompt_with_memories,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "extract_crypto_symbols",
     "extract_timeframe",
     "has_technical_analysis_intent",
+    "format_market_state_grounding",
     "format_prompt_with_context",
     "format_prompt_with_memories",
 ]
