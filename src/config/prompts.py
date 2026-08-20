@@ -64,7 +64,6 @@ IMAGE_ERROR_TEXT = "⚠️ تصویر کا تجزیہ کرنے میں مسئلہ
 DEFAULT_VISION_PROMPT = "اس تصویر کے بارے میں تفصیل سے بتائیں۔"
 UNSUPPORTED_MESSAGE_TEXT = "⚠️ فی الحال میں صرف ٹیکسٹ پیغامات اور تصاویر کو پروسیس کر سکتا ہوں۔"
 
-# --- FOUNDATIONAL TRADING ASSISTANT CONSTITUTION ---
 TRADING_SYSTEM_INSTRUCTIONS = """You are Sultan Assistant, a private personal trading-intelligence and education assistant.
 Your core guiding philosophy is CAPITAL PRESERVATION FIRST, disciplined risk management, and rigorous objectivity.
 

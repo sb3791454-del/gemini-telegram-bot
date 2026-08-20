@@ -1,6 +1,6 @@
 """Configuration package for Sultan Assistant."""
 
-from config.settings import Settings, DEFAULT_GEMINI_MODEL
+from config.settings import Settings, DEFAULT_GEMINI_MODEL, CONVERSATION_HISTORY_LIMIT
 from config.prompts import (
     WELCOME_TEXT,
     HELP_TEXT,
@@ -9,11 +9,14 @@ from config.prompts import (
     FALLBACK_ERROR_TEXT,
     IMAGE_ERROR_TEXT,
     DEFAULT_VISION_PROMPT,
+    UNSUPPORTED_MESSAGE_TEXT,
+    TRADING_SYSTEM_INSTRUCTIONS,
 )
 
 __all__ = [
     "Settings",
     "DEFAULT_GEMINI_MODEL",
+    "CONVERSATION_HISTORY_LIMIT",
     "WELCOME_TEXT",
     "HELP_TEXT",
     "RESET_TEXT",
@@ -21,4 +24,6 @@ __all__ = [
     "FALLBACK_ERROR_TEXT",
     "IMAGE_ERROR_TEXT",
     "DEFAULT_VISION_PROMPT",
+    "UNSUPPORTED_MESSAGE_TEXT",
+    "TRADING_SYSTEM_INSTRUCTIONS",
 ]
