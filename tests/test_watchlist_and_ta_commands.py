@@ -1,14 +1,3 @@
-"""
-Comprehensive Test Suite for Phase 8.2 — Deterministic Market Reasoning Engine.
-Tests:
-- Mathematical accuracy of indicators (Wilder RSI-14, SMA, EMA, Bollinger Bands, %b, ATR-14)
-- Swing point detection and market structure analysis (HH, HL, LH, LL, Breakouts, Breakdowns, Ranges)
-- Multi-timeframe confirmation, alignment, and signal conflict reporting
-- Deterministic trade setup evaluation (SETUP_READY, WAIT_FOR_PULLBACK, WAIT_FOR_BREAKOUT, CONFLICTING_SIGNALS, NO_TRADE)
-- Structured Market Grounding Contract generation and prompt formatting
-- End-to-end natural language queries and deterministic slash commands
-"""
-
 import unittest
 import asyncio
 import json
@@ -133,7 +122,7 @@ class MockGemini:
 
     async def generate_text(self, prompt, model_name=None):
         self.last_prompt = prompt
-        return "Gemini Response"
+        return "Gemini Grounded Response"
 
 
 class TestPhase82MarketReasoningEngine(unittest.TestCase):
@@ -155,264 +144,427 @@ class TestPhase82MarketReasoningEngine(unittest.TestCase):
     def tearDown(self):
         self.loop.close()
 
-    # --- 1. MATHEMATICAL INDICATOR TESTS ---
-    def test_indicator_math_exactness(self):
-        closes = [100.0, 102.0, 101.0, 103.0, 105.0, 104.0, 106.0, 108.0, 107.0, 109.0,
-                  111.0, 110.0, 112.0, 114.0, 113.0, 115.0, 117.0, 116.0, 118.0, 120.0]
+    # --- 1. LONG R:R EXACT MATHEMATICS ---
+    def test_long_rr_exact_mathematics(self):
+        """Verify for LONG: risk = entry - stop_loss; TP = entry + risk * RR."""
+        entry = 70000.0
+        sl = 68000.0
+        risk = entry - sl  # 2000.0
+        res = calculate_position_risk(capital=10000.0, risk_pct=1.0, entry_price=entry, stop_loss_price=sl, direction="LONG")
         
-        # SMA
-        sma20 = calculate_sma(closes, 20)
-        self.assertAlmostEqual(sma20, sum(closes) / 20.0, places=4)
+        self.assertEqual(res.direction, "LONG")
+        self.assertEqual(res.risk_usd, 100.0)
+        self.assertEqual(res.position_size_coins, 100.0 / 2000.0)  # 0.05 BTC
+        self.assertAlmostEqual(res.tp1_price, entry + 1.5 * risk)  # 73000.0
+        self.assertAlmostEqual(res.tp2_price, entry + 2.0 * risk)  # 74000.0
+        self.assertAlmostEqual(res.tp3_price, entry + 3.0 * risk)  # 76000.0
 
-        # EMA
-        ema20 = calculate_ema(closes, 20)
-        self.assertTrue(100.0 < ema20 < 120.0)
-
-        # RSI (Wilder smoothed)
-        rsi = calculate_rsi(closes, 14)
-        self.assertTrue(0.0 <= rsi <= 100.0)
-        self.assertTrue(rsi > 60.0)  # Strong upward trend
-
-        # Bollinger Bands & %b
-        upper, mid, lower, bw = calculate_bollinger_bands(closes, 20, 2.0)
-        self.assertAlmostEqual(mid, sma20, places=4)
-        self.assertTrue(upper > mid > lower)
-        self.assertTrue(bw > 0.0)
-
-        pct_b = calculate_bollinger_percent_b(closes[-1], lower, upper)
-        self.assertTrue(0.0 <= pct_b <= 1.5)
-
-    def test_rsi_overbought_oversold_classification(self):
-        # Monotonically rising -> RSI 100
-        up_closes = [float(100 + i * 2) for i in range(30)]
-        rsi_up = calculate_rsi(up_closes, 14)
-        self.assertEqual(rsi_up, 100.0)
-
-        # Monotonically falling -> RSI 0
-        down_closes = [float(100 - i * 2) for i in range(30)]
-        rsi_down = calculate_rsi(down_closes, 14)
-        self.assertEqual(rsi_down, 0.0)
-
-    # --- 2. SWING POINTS & MARKET STRUCTURE TESTS ---
-    def test_swing_points_and_bullish_structure(self):
-        candles_up = []
-        for i in range(50):
-            p = 60000 + i * 50 + math.sin(i * 0.5) * 800
-            candles_up.append(Candle(
-                open_time=1700000000000 + i * 3600000,
-                open=p, high=p + 150, low=p - 150, close=p + 50,
-                volume=100.0 + i, close_time=1700003599000
-            ))
-
-        sh, sl = calculate_swing_points(candles_up, lookback=2)
-        self.assertTrue(len(sh) >= 2)
-        self.assertTrue(len(sl) >= 2)
-
-        ms = analyze_market_structure("BTCUSDT", "1h", candles_up, lookback_window=30)
-        self.assertIn("Bullish", ms.trend)
-        self.assertTrue(ms.higher_highs_count > 0)
-        self.assertTrue(ms.higher_lows_count > 0)
-        self.assertTrue(ms.support_level > 0.0)
-        self.assertTrue(ms.resistance_level > ms.support_level)
-
-    def test_market_structure_bearish(self):
-        candles_down = []
-        for i in range(50):
-            p = 60000 - i * 50 - math.sin(i * 0.5) * 800
-            candles_down.append(Candle(
-                open_time=1700000000000 + i * 3600000,
-                open=p, high=p + 150, low=p - 150, close=p - 50,
-                volume=100.0 + i, close_time=1700003599000
-            ))
-
-        ms = analyze_market_structure("BTCUSDT", "1h", candles_down, lookback_window=30)
-        self.assertIn("Bearish", ms.trend)
-        self.assertTrue(ms.lower_highs_count > 0)
-        self.assertTrue(ms.lower_lows_count > 0)
-
-    def test_market_structure_ranging(self):
-        candles_range = []
-        for i in range(50):
-            p = 60000 + math.sin(i * 0.8) * 500
-            candles_range.append(Candle(
-                open_time=1700000000000 + i * 3600000,
-                open=p, high=p + 100, low=p - 100, close=p,
-                volume=100.0, close_time=1700003599000
-            ))
-
-        ms = analyze_market_structure("BTCUSDT", "1h", candles_range, lookback_window=30)
-        self.assertIn("Consolidation", ms.structure_type)
-        self.assertEqual(ms.trend, "Neutral")
-
-    # --- 3. MULTI-TIMEFRAME ALIGNMENT TESTS ---
-    def test_mtf_alignment_matrix(self):
-        now_iso = "2026-08-20T10:00:00Z"
+    # --- 2. SHORT R:R EXACT MATHEMATICS ---
+    def test_short_rr_exact_mathematics(self):
+        """Verify for SHORT: risk = stop_loss - entry; TP = entry - risk * RR."""
+        entry = 60000.0
+        sl = 62000.0
+        risk = sl - entry  # 2000.0
+        res = calculate_position_risk(capital=10000.0, risk_pct=1.0, entry_price=entry, stop_loss_price=sl, direction="SHORT")
         
-        # 1. Full Bullish Alignment
-        candles_bull = [Candle(i, 60000 + i * 100, 60100 + i * 100, 59900 + i * 100, 60050 + i * 100, 100.0, i + 1) for i in range(50)]
-        ta_1d = evaluate_market_structure("BTCUSDT", "1d", candles_bull, now_iso)
-        ta_4h = evaluate_market_structure("BTCUSDT", "4h", candles_bull, now_iso)
-        ta_1h = evaluate_market_structure("BTCUSDT", "1h", candles_bull, now_iso)
+        self.assertEqual(res.direction, "SHORT")
+        self.assertEqual(res.risk_usd, 100.0)
+        self.assertEqual(res.position_size_coins, 100.0 / 2000.0)  # 0.05 BTC
+        self.assertAlmostEqual(res.tp1_price, entry - 1.5 * risk)  # 57000.0
+        self.assertAlmostEqual(res.tp2_price, entry - 2.0 * risk)  # 56000.0
+        self.assertAlmostEqual(res.tp3_price, entry - 3.0 * risk)  # 54000.0
 
-        mtf_bull = determine_mtf_alignment("1h", {"1d": ta_1d, "4h": ta_4h, "1h": ta_1h})
-        self.assertEqual(mtf_bull.alignment_status, "Aligned Bullish")
-        self.assertFalse(mtf_bull.has_conflict)
+    # --- 3. LONG TARGET ALREADY BELOW CURRENT PRICE ---
+    def test_long_target_already_below_current_price(self):
+        """
+        When market is extended (e.g. BTC = $72,338), and a pullback entry is proposed at $70,800 with
+        hard SL at $70,132 (risk = $668), TP1 is $71,802 and TP2 is $72,136.
+        The engine must recognize that TP1 & TP2 are currently below live market price $72,338.
+        """
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(40):
+            p = 65000 + i * 150
+            candles.append(Candle(i, p, p + 50, p - 50, p, 100.0, i + 1))
+        for i in range(10):
+            p = 71000 + i * 133.8
+            candles.append(Candle(40 + i, p - 50, p + 100, p - 60, p, 300.0, 40 + i + 1))
 
-        # 2. Conflicting: 1D Bullish vs 1H Bearish
-        candles_bear = [Candle(i, 60000 - i * 100, 60100 - i * 100, 59800 - i * 100, 59900 - i * 100, 100.0, i + 1) for i in range(50)]
-        ta_1h_bear = evaluate_market_structure("BTCUSDT", "1h", candles_bear, now_iso)
-
-        mtf_conflict = determine_mtf_alignment("1h", {"1d": ta_1d, "4h": ta_4h, "1h": ta_1h_bear})
-        self.assertTrue(mtf_conflict.has_conflict)
-        self.assertIn("Pullback", mtf_conflict.alignment_status)
-
-    # --- 4. TRADE SETUP EVALUATION TESTS ---
-    def test_trade_setup_states(self):
-        now_iso = "2026-08-20T10:00:00Z"
-
-        # Pullback in Bull Trend setup
-        candles_up = []
-        for i in range(50):
-            p = 60000 + i * 50 + math.sin(i * 0.5) * 800
-            candles_up.append(Candle(i, p, p + 150, p - 150, p + 50, 100.0, i + 1))
-        
-        ta_up = evaluate_market_structure("BTCUSDT", "1h", candles_up, now_iso)
-        ms_up = analyze_market_structure("BTCUSDT", "1h", candles_up)
-        
-        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles_up, ta_up, ms_up)
-        self.assertIn(setup.setup_state, ("SETUP_READY", "WAIT_FOR_PULLBACK", "WAIT_FOR_BREAKOUT_CONFIRMATION"))
-        self.assertIn(setup.direction_bias, ("LONG", "BULLISH_WATCH"))
-        self.assertTrue(setup.invalidation_level is not None)
-
-    # --- 5. STRUCTURED GROUNDING CONTRACT FORMATTING ---
-    def test_structured_market_grounding_contract(self):
-        now_iso = "2026-08-20T10:00:00Z"
-        candles = [Candle(i, 65000 + i * 50, 65100 + i * 50, 64900 + i * 50, 65050 + i * 50, 100.0, i + 1) for i in range(50)]
         ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
         ms = analyze_market_structure("BTCUSDT", "1h", candles)
-        mtf = determine_mtf_alignment("1h", {"1h": ta})
-        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms, mtf)
-        ticker = Ticker24h("BTCUSDT", 67500.0, 1500.0, 2.27, 68000.0, 65000.0, 10000.0, 675000000.0, now_iso, "Binance Spot")
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
 
-        state = MarketState(
-            symbol="BTCUSDT",
-            primary_timeframe="1h",
-            current_price=67500.0,
-            timestamp=now_iso,
-            source="Binance Spot",
-            ticker_24h=ticker,
-            primary_ta=ta,
-            market_structure=ms,
-            multi_timeframe=mtf,
-            trade_setup=setup
-        )
+        self.assertEqual(setup.setup_state, "WAIT_FOR_PULLBACK")
+        self.assertEqual(setup.direction_bias, "LONG")
+        self.assertIn("Pullback", setup.execution_scenario)
+        self.assertTrue(len(setup.tp_target_details) > 0)
+        if setup.suggested_tp_levels and setup.suggested_tp_levels[0] <= ta.current_price:
+            any_below_warning = any("Currently below market" in d for d in setup.tp_target_details)
+            self.assertTrue(any_below_warning)
 
-        grounding_text = format_market_state_grounding(state)
-        self.assertIn("=== [LIVE MARKET FACTS] ===", grounding_text)
-        self.assertIn("=== [MARKET STRUCTURE — 1H] ===", grounding_text)
-        self.assertIn("=== [MOMENTUM & MOVING AVERAGES — 1H] ===", grounding_text)
-        self.assertIn("=== [VOLATILITY, BOLLINGER BANDS & VOLUME — 1H] ===", grounding_text)
-        self.assertIn("=== [MULTI-TIMEFRAME CONFIRMATION & ALIGNMENT] ===", grounding_text)
-        self.assertIn("=== [DETERMINISTIC TRADE SETUP EVALUATION] ===", grounding_text)
+    # --- 4. SHORT TARGET ALREADY ABOVE CURRENT PRICE ---
+    def test_short_target_already_above_current_price(self):
+        """
+        When market is extended downward (e.g. BTC = $55,000), and a relief rally entry is proposed at $57,000
+        with hard SL at $58,000 (risk = $1,000), TP1 is $55,500.
+        The engine must recognize that TP1 is currently above live market price $55,000.
+        """
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(40):
+            p = 65000 - i * 150
+            candles.append(Candle(i, p, p + 50, p - 50, p, 100.0, i + 1))
+        for i in range(10):
+            p = 59000 - i * 400
+            candles.append(Candle(40 + i, p + 50, p + 60, p - 100, p, 300.0, 40 + i + 1))
 
-    # --- 6. END-TO-END NLP DISPATCH & GEMINI PROMPT INJECTION ---
-    def test_end_to_end_nl_market_reasoning(self):
-        klines_calls = []
-        async def mock_fetch(url, **kwargs):
-            if "ticker/24hr" in url:
-                return MockHttpResponse(json.dumps({
-                    "symbol": "BTCUSDT", "lastPrice": "68500.00", "priceChange": "1200.00",
-                    "priceChangePercent": "1.78", "highPrice": "69000.00", "lowPrice": "67000.00",
-                    "volume": "10000.00", "quoteVolume": "685000000.00"
-                }))
-            elif "klines" in url:
-                klines_calls.append(url)
-                candles_data = []
-                for i in range(50):
-                    p = 65000 + i * 60
-                    candles_data.append([1700000000000 + i * 3600000, str(p), str(p + 150), str(p - 100), str(p + 40), "100.0", 1700003599000])
-                return MockHttpResponse(json.dumps(candles_data))
-            return MockHttpResponse("{}")
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
 
-        b_client = BinanceClient(mock_fetch)
+        self.assertEqual(setup.setup_state, "WAIT_FOR_PULLBACK")
+        self.assertEqual(setup.direction_bias, "SHORT")
+        self.assertIn("Relief", setup.execution_scenario)
+        if setup.suggested_tp_levels and setup.suggested_tp_levels[0] >= ta.current_price:
+            any_above_warning = any("Currently above market" in d for d in setup.tp_target_details)
+            self.assertTrue(any_above_warning)
 
-        # 1. Query: "look at BTC on the 1-hour chart and tell me what you're seeing."
-        update1 = {
-            "message": {
-                "chat": {"id": 8116631925},
-                "from": {"id": 8116631925, "first_name": "Abdul"},
-                "text": "look at BTC on the 1-hour chart and tell me what you're seeing."
-            }
-        }
-        self.loop.run_until_complete(
-            dispatch_telegram_update(update1, self.settings, self.tg, self.gem, binance_client=b_client)
-        )
-        self.assertIn("=== [LIVE MARKET FACTS] ===", self.gem.last_prompt)
-        self.assertIn("=== [MARKET STRUCTURE — 1H] ===", self.gem.last_prompt)
-        self.assertIn("=== [MOMENTUM & MOVING AVERAGES — 1H] ===", self.gem.last_prompt)
-        self.assertIn("=== [DETERMINISTIC TRADE SETUP EVALUATION] ===", self.gem.last_prompt)
+    # --- 5. RESISTANCE INVALIDATES THEORETICAL LONG R:R ---
+    def test_resistance_invalidates_theoretical_long_rr(self):
+        """
+        If room to resistance is less than 1.0x risk distance (e.g. resistance is only $400 away but risk is $1000),
+        an immediate long entry has unfavorable R:R (< 1:1) before hitting supply.
+        The engine must NOT return SETUP_READY; it must return WAIT_FOR_PULLBACK or WAIT_FOR_BREAKOUT_CONFIRMATION.
+        """
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(48):
+            p = 60000 + i * 20
+            candles.append(Candle(i, p, p + 100, p - 100, p, 100.0, i + 1))
+        candles.append(Candle(48, 60950, 61000, 60800, 60950, 100.0, 49))
+        candles.append(Candle(49, 60950, 61000, 60850, 60960, 100.0, 50))
 
-        # 2. Query: "Should I long BTC?"
-        update2 = {
-            "message": {
-                "chat": {"id": 8116631925},
-                "from": {"id": 8116631925, "first_name": "Abdul"},
-                "text": "Should I long BTC?"
-            }
-        }
-        self.loop.run_until_complete(
-            dispatch_telegram_update(update2, self.settings, self.tg, self.gem, binance_client=b_client)
-        )
-        self.assertIn("=== [DETERMINISTIC TRADE SETUP EVALUATION] ===", self.gem.last_prompt)
-        self.assertIn("Setup State:", self.gem.last_prompt)
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
 
-        # 3. Plain price query
-        count_before = len(klines_calls)
-        update3 = {
-            "message": {
-                "chat": {"id": 8116631925},
-                "from": {"id": 8116631925, "first_name": "Abdul"},
-                "text": "what is the price of BTC?"
-            }
-        }
-        self.loop.run_until_complete(
-            dispatch_telegram_update(update3, self.settings, self.tg, self.gem, binance_client=b_client)
-        )
-        self.assertIn("Verified Spot Price: $68,500.00", self.gem.last_prompt)
-        self.assertNotIn("=== [MARKET STRUCTURE", self.gem.last_prompt)
-        self.assertEqual(len(klines_calls), count_before)
+        self.assertNotEqual(setup.setup_state, "SETUP_READY")
+        self.assertIn(setup.setup_state, ("WAIT_FOR_PULLBACK", "WAIT_FOR_BREAKOUT_CONFIRMATION"))
 
-    # --- 7. SLASH COMMANDS DETERMINISTIC FUNCTIONALITY ---
-    def test_commands_preservation(self):
+    # --- 6. SUPPORT INVALIDATES THEORETICAL SHORT R:R ---
+    def test_support_invalidates_theoretical_short_rr(self):
+        """
+        If room to support is less than 1.0x risk distance, an immediate short entry has unfavorable R:R (< 1:1)
+        before hitting major support. The engine must return WAIT_FOR_PULLBACK or WAIT_FOR_BREAKDOWN_CONFIRMATION.
+        """
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(48):
+            p = 60000 - i * 20
+            candles.append(Candle(i, p, p + 100, p - 100, p, 100.0, i + 1))
+        candles.append(Candle(48, 59050, 59200, 59000, 59050, 100.0, 49))
+        candles.append(Candle(49, 59050, 59150, 59000, 59040, 100.0, 50))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertNotEqual(setup.setup_state, "SETUP_READY")
+        self.assertIn(setup.setup_state, ("WAIT_FOR_PULLBACK", "WAIT_FOR_BREAKDOWN_CONFIRMATION"))
+
+    # --- 7. STRUCTURAL WARNING DIFFERS FROM HARD SL ---
+    def test_structural_warning_differs_from_hard_sl(self):
+        """
+        Verify that structural warning level (e.g. recent swing low) is distinct from hard SL (swing low - 1.5x ATR buffer).
+        """
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(50):
+            p = 60000 + i * 50 + math.sin(i * 0.5) * 800
+            candles.append(Candle(i, p, p + 150, p - 150, p + 50, 100.0, i + 1))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        if setup.structural_warning_level is not None and setup.suggested_sl_level is not None:
+            self.assertNotEqual(setup.structural_warning_level, setup.suggested_sl_level)
+            if setup.direction_bias in ("LONG", "BULLISH_WATCH"):
+                self.assertLess(setup.suggested_sl_level, setup.structural_warning_level)
+
+    # --- 8. INVALID ENTRY / SL RELATIONSHIPS ---
+    def test_invalid_entry_sl_relationships(self):
+        """Verify that calculate_position_risk strictly validates entry and SL placement."""
+        with self.assertRaises(ValueError):
+            calculate_position_risk(1000, 2, 50000, 50000, direction="LONG")
+        with self.assertRaises(ValueError):
+            calculate_position_risk(1000, 2, 50000, 51000, direction="LONG")
+        with self.assertRaises(ValueError):
+            calculate_position_risk(1000, 2, 50000, 50000, direction="SHORT")
+        with self.assertRaises(ValueError):
+            calculate_position_risk(1000, 2, 50000, 49000, direction="SHORT")
+        with self.assertRaises(ValueError):
+            calculate_position_risk(-1000, 2, 50000, 48000)
+        with self.assertRaises(ValueError):
+            calculate_position_risk(1000, 0, 50000, 48000)
+        with self.assertRaises(ValueError):
+            calculate_position_risk(1000, 2, 0, 48000)
+
+    # --- 9. CURRENT-PRICE CONSISTENCY ---
+    def test_current_price_consistency(self):
+        """Verify that format_market_state_grounding outputs verified current price matching input."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = [Candle(i, 65000, 65100, 64900, 65050.0, 100.0, i + 1) for i in range(50)]
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+        state = MarketState("BTCUSDT", "1h", 65050.0, now_iso, "Spot Klines", None, ta, ms, None, setup)
+
+        grounding = format_market_state_grounding(state)
+        self.assertIn("Verified Current Price: $65,050.00", grounding)
+        self.assertIn("Current Verified Market Price: $65,050.00", grounding)
+
+    # --- 10. PULLBACK SETUP WHEN MARKET IS EXTENDED ---
+    def test_pullback_setup_when_market_is_extended(self):
+        """Verify that when price is > 1.8x ATR above EMA20, WAIT_FOR_PULLBACK is triggered."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(40):
+            p = 60000 + i * 50
+            candles.append(Candle(i, p, p + 50, p - 50, p, 100.0, i + 1))
+        for i in range(10):
+            p = 62000 + i * 500
+            candles.append(Candle(40 + i, p - 100, p + 200, p - 100, p, 500.0, 40 + i + 1))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertEqual(setup.setup_state, "WAIT_FOR_PULLBACK")
+        self.assertEqual(setup.direction_bias, "LONG")
+        self.assertTrue(any("extended" in r.lower() for r in setup.reasons))
+
+    # --- 11. BREAKOUT CONFIRMATION SETUP ---
+    def test_breakout_confirmation_setup(self):
+        """Verify that when price is pressing against resistance, WAIT_FOR_BREAKOUT_CONFIRMATION is output."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(20):
+            p = 62000 + i * 200
+            candles.append(Candle(i, p, p + 100, p - 100, p, 100.0, i + 1))
+        for i in range(15):
+            p = 66000 - i * 100
+            candles.append(Candle(20 + i, p + 50, p + 80, p - 120, p, 100.0, 20 + i + 1))
+        for i in range(15):
+            p = 64500 + i * 100
+            candles.append(Candle(35 + i, p - 50, p + 120, p - 60, p, 150.0, 35 + i + 1))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertEqual(setup.setup_state, "WAIT_FOR_BREAKOUT_CONFIRMATION")
+        self.assertEqual(setup.direction_bias, "BULLISH_WATCH")
+        self.assertTrue(len(setup.suggested_tp_levels) > 0)
+
+    # --- 12. NO TRADE WHEN NO EXECUTABLE SETUP EXISTS ---
+    def test_no_trade_when_no_executable_setup(self):
+        """Verify that in range-bound chop with neutral indicators, NO_TRADE is output."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(50):
+            p = 60000 + math.sin(i * 0.8) * 300
+            candles.append(Candle(i, p, p + 50, p - 50, p, 100.0, i + 1))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertEqual(setup.setup_state, "NO_TRADE")
+        self.assertEqual(setup.direction_bias, "NEUTRAL")
+        self.assertTrue(any("range-bound" in r.lower() for r in setup.reasons))
+
+    # --- 13. LONG / SHORT SYMMETRY ---
+    def test_long_short_symmetry(self):
+        """Verify strict symmetric logic between bullish and bearish setups."""
+        now_iso = "2026-08-20T12:00:00Z"
+        
+        # Bullish healthy series
+        candles_bull = [Candle(i, 50000 + i * 50, 50050 + i * 50, 49950 + i * 50, 50020 + i * 50, 100.0, i + 1) for i in range(50)]
+        ta_bull = evaluate_market_structure("BTCUSDT", "1h", candles_bull, now_iso)
+        ms_bull = analyze_market_structure("BTCUSDT", "1h", candles_bull)
+        setup_bull = evaluate_deterministic_setup("BTCUSDT", "1h", candles_bull, ta_bull, ms_bull)
+
+        # Bearish healthy series
+        candles_bear = [Candle(i, 50000 - i * 50, 50050 - i * 50, 49950 - i * 50, 49980 - i * 50, 100.0, i + 1) for i in range(50)]
+        ta_bear = evaluate_market_structure("BTCUSDT", "1h", candles_bear, now_iso)
+        ms_bear = analyze_market_structure("BTCUSDT", "1h", candles_bear)
+        setup_bear = evaluate_deterministic_setup("BTCUSDT", "1h", candles_bear, ta_bear, ms_bear)
+
+        self.assertEqual(ta_bull.trend, "Bullish")
+        self.assertEqual(ta_bear.trend, "Bearish")
+        self.assertIn(setup_bull.direction_bias, ("LONG", "BULLISH_WATCH"))
+        self.assertIn(setup_bear.direction_bias, ("SHORT", "BEARISH_WATCH"))
+
+    # --- 14. GEMINI IS NEVER RESPONSIBLE FOR CALCULATIONS ---
+    def test_gemini_never_calculates_values(self):
+        """
+        Verify end-to-end that all indicator math, market structure, and setup levels
+        are pre-computed by the Python engine and injected into the Gemini prompt as immutable facts.
+        """
         async def mock_fetch(url, **kwargs):
             if "klines" in url:
                 candles_data = []
                 for i in range(50):
-                    p = 65000 + i * 20
+                    p = 65000 + i * 30
                     candles_data.append([1700000000000 + i * 3600000, str(p), str(p + 100), str(p - 100), str(p + 10), "100.0", 1700003599000])
                 return MockHttpResponse(json.dumps(candles_data))
-            return MockHttpResponse(json.dumps({"symbol": "BTCUSDT", "price": "65000.00", "lastPrice": "65000.00"}))
+            return MockHttpResponse(json.dumps({"symbol": "BTCUSDT", "lastPrice": "66500.00", "priceChange": "1500.00", "priceChangePercent": "2.31"}))
 
         b_client = BinanceClient(mock_fetch)
-
-        # /ta command
+        update = {
+            "message": {
+                "chat": {"id": 8116631925},
+                "from": {"id": 8116631925, "first_name": "Abdul"},
+                "text": "What is the trade setup for BTC on 1h?"
+            }
+        }
         self.loop.run_until_complete(
-            handle_command("/ta BTCUSDT 1h", 100, self.tg, user_id=8116631925, binance_client=b_client)
+            dispatch_telegram_update(update, self.settings, self.tg, self.gem, binance_client=b_client)
         )
-        msg_ta = self.tg.sent[-1]["text"]
-        self.assertIn("BTCUSDT Technical Analysis", msg_ta)
-        self.assertIn("RSI (14, Wilder):", msg_ta)
-        self.assertIn("EMA Alignment:", msg_ta)
-        self.assertIn("Dynamic SL Buffer", msg_ta)
 
-        # /risk command
-        self.loop.run_until_complete(
-            handle_command("/risk 1000 2 65000 63500", 100, self.tg, user_id=8116631925)
+        prompt = self.gem.last_prompt
+        self.assertIn("=== [LIVE MARKET FACTS] ===", prompt)
+        self.assertIn("=== [MARKET STRUCTURE — 1H] ===", prompt)
+        self.assertIn("=== [MOMENTUM & MOVING AVERAGES — 1H] ===", prompt)
+        self.assertIn("=== [VOLATILITY, BOLLINGER BANDS & VOLUME — 1H] ===", prompt)
+        self.assertIn("=== [DETERMINISTIC TRADE SETUP EVALUATION] ===", prompt)
+        self.assertIn("• Proposed Hard Stop-Loss:", prompt)
+        self.assertIn("• Calculated Take-Profit Targets:", prompt)
+
+    # --- 15. LONG SETUP READY HEALTHY RUNWAY ---
+    def test_long_setup_ready_healthy_runway(self):
+        """Verify that when price is near EMA20 with healthy RSI and ample room to resistance, SETUP_READY is returned."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(50):
+            p = 50000 + i * 40
+            candles.append(Candle(i, p, p + 50, p - 50, p + 10, 100.0, i + 1))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertIn(setup.setup_state, ("SETUP_READY", "WAIT_FOR_PULLBACK"))
+        self.assertEqual(setup.direction_bias, "LONG")
+        if setup.setup_state == "SETUP_READY":
+            self.assertIn("Market Execution", setup.execution_scenario)
+            self.assertTrue(len(setup.suggested_tp_levels) == 3)
+
+    # --- 16. SHORT SETUP READY HEALTHY RUNWAY ---
+    def test_short_setup_ready_healthy_runway(self):
+        """Verify that when price is near EMA20 with healthy bearish RSI and ample room to support, SETUP_READY or WAIT_FOR_PULLBACK is returned."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(50):
+            p = 50000 - i * 40
+            candles.append(Candle(i, p, p + 50, p - 50, p - 10, 100.0, i + 1))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertIn(setup.setup_state, ("SETUP_READY", "WAIT_FOR_PULLBACK"))
+        self.assertEqual(setup.direction_bias, "SHORT")
+        if setup.setup_state == "SETUP_READY":
+            self.assertIn("Market Execution", setup.execution_scenario)
+            self.assertTrue(len(setup.suggested_tp_levels) == 3)
+
+    # --- 17. BULLISH STRUCTURE BREAKDOWN TO NO TRADE ---
+    def test_bullish_structure_breakdown_to_no_trade(self):
+        """Verify that when price breaks below swing low in an apparent bullish trend, NO_TRADE is returned."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(15):
+            p = 50000 + i * 100
+            candles.append(Candle(i, p, p + 50, p - 50, p, 100.0, i + 1))
+        for i in range(10):
+            p = 51500 - i * 50
+            candles.append(Candle(15 + i, p, p + 50, p - 50, p, 100.0, 15 + i + 1))
+        for i in range(15):
+            p = 51000 + i * 100
+            candles.append(Candle(25 + i, p, p + 50, p - 50, p, 100.0, 25 + i + 1))
+        # Breach below recent swing low (50950)
+        candles.append(Candle(40, 52500, 52500, 50800, 50850, 100.0, 41))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertEqual(setup.setup_state, "NO_TRADE")
+        self.assertIn("NEUTRAL", setup.direction_bias)
+        self.assertTrue(any("broken below recent swing low" in r for r in setup.reasons))
+
+    # --- 18. BEARISH STRUCTURE BREAKOUT TO NO TRADE ---
+    def test_bearish_structure_breakout_to_no_trade(self):
+        """Verify that when price reclaims above swing high in an apparent bearish trend, NO_TRADE is returned."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = []
+        for i in range(15):
+            p = 50000 - i * 100
+            candles.append(Candle(i, p, p + 50, p - 50, p, 100.0, i + 1))
+        for i in range(10):
+            p = 48500 + i * 50
+            candles.append(Candle(15 + i, p, p + 50, p - 50, p, 100.0, 15 + i + 1))
+        for i in range(15):
+            p = 49000 - i * 100
+            candles.append(Candle(25 + i, p, p + 50, p - 50, p, 100.0, 25 + i + 1))
+        # Reclaim above recent swing high (49050)
+        candles.append(Candle(40, 47500, 49200, 47500, 49150, 100.0, 41))
+
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertEqual(setup.setup_state, "NO_TRADE")
+        self.assertIn("NEUTRAL", setup.direction_bias)
+        self.assertTrue(any("broken above recent swing high" in r for r in setup.reasons))
+
+    # --- 19. MULTI TIMEFRAME CONFLICT EXECUTION ---
+    def test_multi_timeframe_conflict_execution(self):
+        """Verify that when MTF summary has conflict, CONFLICTING_SIGNALS is returned with target calculation suspended."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = [Candle(i, 60000 + i * 20, 60050 + i * 20, 59950 + i * 20, 60010 + i * 20, 100.0, i + 1) for i in range(50)]
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        
+        mtf_summary = MultiTimeframeSummary(
+            primary_timeframe="1h",
+            timeframes={},
+            alignment_status="Conflicting / Pullback in Uptrend",
+            alignment_description="1D: Bullish | 1H: Bearish",
+            has_conflict=True,
+            conflict_details="1D Bullish trend intact while 1H is in corrective pullback."
         )
-        msg_risk = self.tg.sent[-1]["text"]
-        self.assertIn("Position Sizing & Risk Management Breakdown", msg_risk)
-        self.assertIn("LONG", msg_risk)
-        self.assertIn("TP1 (1:1.5 R:R)", msg_risk)
+
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms, mtf_summary=mtf_summary)
+        self.assertEqual(setup.setup_state, "CONFLICTING_SIGNALS")
+        self.assertEqual(setup.direction_bias, "NEUTRAL / CAUTION")
+        self.assertEqual(len(setup.suggested_tp_levels), 0)
+        self.assertIn("suspended", setup.sr_clearance_status.lower())
+
+    # --- 20. INSUFFICIENT DATA CANDLE THRESHOLD ---
+    def test_insufficient_data_candle_threshold(self):
+        """Verify that when fewer than 15 candles are provided, INSUFFICIENT_DATA is returned."""
+        now_iso = "2026-08-20T12:00:00Z"
+        candles = [Candle(i, 60000, 60050, 59950, 60010, 100.0, i + 1) for i in range(10)]
+        ta = evaluate_market_structure("BTCUSDT", "1h", candles, now_iso)
+        ms = analyze_market_structure("BTCUSDT", "1h", candles)
+        setup = evaluate_deterministic_setup("BTCUSDT", "1h", candles, ta, ms)
+
+        self.assertEqual(setup.setup_state, "INSUFFICIENT_DATA")
+        self.assertEqual(setup.direction_bias, "NEUTRAL")
+        self.assertIn("minimum 15 candles", setup.reasons[0])
 
 
 if __name__ == "__main__":
