@@ -1,6 +1,7 @@
 """
 Cloudflare Python Worker - Sultan Assistant Platform Entrypoint
-Handles HTTP request routing, health checks, webhook setup, and update dispatching.
+Handles HTTP request routing, health checks, webhook setup, update dispatching,
+and scheduled cron triggers for automated market alerts.
 """
 
 import json
@@ -20,8 +21,10 @@ from storage.repositories import (
     SettingsRepository,
     ConversationRepository,
     WatchlistRepository,
+    AlertRepository,
 )
 from trading.binance_client import BinanceClient
+from alerts.scheduler import AlertScheduler
 
 # Configure root worker logger
 logger = logging.getLogger("worker")
@@ -92,6 +95,7 @@ async def on_fetch(request, env):
     memory_repo = MemoryRepository(db)
     conversation_repo = ConversationRepository(db, settings_repo=settings_repo)
     watchlist_repo = WatchlistRepository(db)
+    alert_repo = AlertRepository(db)
     binance_client = BinanceClient(async_http_request)
 
     # 1. Diagnostic Health Endpoint: GET /health (Safe: exposes zero secrets, tokens, or IDs)
@@ -100,11 +104,12 @@ async def on_fetch(request, env):
             "status": "ok",
             "service": "sultan-assistant",
             "runtime": "cloudflare-python-worker",
-            "phase": "phase-8-technical-analysis-and-risk-engine",
+            "phase": "phase-9-deterministic-monitoring-and-alerts",
             "active_model": settings.gemini_model,
             "private_mode": settings.is_private_mode_enabled,
             "database_connected": db.is_available,
             "market_data_engine": "multi-exchange-spot-kline-resilient",
+            "alert_engine": "active-deterministic-cron-monitoring",
             "env_configured": {
                 "TELEGRAM_BOT_TOKEN": bool(settings.telegram_bot_token),
                 "GEMINI_API_KEY": bool(settings.gemini_api_key),
@@ -122,11 +127,12 @@ async def on_fetch(request, env):
         db_str = "Connected (D1)" if db.is_available else "Offline / Ephemeral"
         return text_response(
             f"🤖 Sultan Assistant is active on Cloudflare Python Workers!\n"
-            f"Phase: Phase 8 Technical Analysis & Risk Management Engine\n"
+            f"Phase: Phase 9 Deterministic Market Monitoring & Alert System\n"
             f"Active Model: {settings.gemini_model}\n"
             f"Access Mode: {mode_str}\n"
             f"Database: {db_str}\n"
-            f"Market Engine: Connected (Binance + Bybit + OKX + KuCoin)\n\n"
+            f"Market Engine: Connected (Binance + Bybit + OKX + KuCoin)\n"
+            f"Alert Engine: Active (Automated 2-Min Cron Monitoring)\n\n"
             "Endpoints:\n"
             "- GET /health       : System and configuration status\n"
             "- GET /set_webhook  : Register Telegram webhook\n"
@@ -192,7 +198,8 @@ async def on_fetch(request, env):
                 memory_repo=memory_repo,
                 conversation_repo=conversation_repo,
                 watchlist_repo=watchlist_repo,
-                binance_client=binance_client
+                binance_client=binance_client,
+                alert_repo=alert_repo
             )
             return json_response({"ok": True})
         except Exception as e:
@@ -200,3 +207,40 @@ async def on_fetch(request, env):
             return json_response({"ok": False, "error": str(e)}, status=500)
 
     return json_response({"error": "Not Found", "path": path}, status=404)
+
+
+async def on_scheduled(event, env, ctx):
+    """
+    Cloudflare Python Worker Cron Trigger Entrypoint (Phase 9).
+    Periodically evaluates active user alerts and dispatches deterministic notifications.
+    """
+    logger.info("Starting scheduled alert evaluation tick...")
+    settings = Settings(env)
+    
+    # 1. Fail-closed: Ensure D1 database and bot token are configured
+    d1_binding = getattr(env, "ASSISTANT_DB", None)
+    db = D1Database(d1_binding)
+    if not db.is_available or not settings.telegram_bot_token:
+        logger.warning("Scheduled tick skipped: D1 database or Bot Token unavailable.")
+        return
+
+    # 2. Instantiate isolated alert execution pipeline
+    alert_repo = AlertRepository(db)
+    telegram_client = TelegramClient(settings.telegram_bot_token, async_http_request)
+    binance_client = BinanceClient(async_http_request)
+
+    scheduler = AlertScheduler(
+        alert_repo=alert_repo,
+        binance_client=binance_client,
+        telegram_client=telegram_client,
+        settings=settings
+    )
+
+    # 3. Execute batch tick within Worker lifecycle
+    try:
+        if ctx and hasattr(ctx, "waitUntil"):
+            ctx.waitUntil(scheduler.run_scheduled_tick())
+        else:
+            await scheduler.run_scheduled_tick()
+    except Exception as e:
+        logger.error(f"Unhandled error in on_scheduled tick: {e}")

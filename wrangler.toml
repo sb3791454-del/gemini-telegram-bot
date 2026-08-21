@@ -3,13 +3,14 @@ main = "src/entry.py"
 compatibility_date = "2024-04-03"
 compatibility_flags = ["python_workers"]
 
-# Cloudflare D1 Database Binding for Sultan Assistant State & Memory
-[[d1_databases]]
-binding = "ASSISTANT_DB"
-database_name = "sultan-assistant-db"
-database_id = "6a9f3dad-24b8-4b0a-810a-b7733a664c85"
+[triggers]
+crons = ["*/2 * * * *"]
 
-# Cloudflare Workers Secrets (configure via `wrangler secret put <NAME>` or Cloudflare Dashboard):
+# Cloudflare D1 Database Binding for Sultan Assistant State, Memory & Alerts
+# database_name = "sultan-assistant-db"
+# database_id = "6a9f3dad-24b8-4b0a-810a-b7733a664c85"
+
+# Cloudflare Workers Secrets:
 # - TELEGRAM_BOT_TOKEN
 # - GEMINI_API_KEY
 # - ALLOWED_USER_IDS (required: comma-separated numeric Telegram user IDs for private access)
