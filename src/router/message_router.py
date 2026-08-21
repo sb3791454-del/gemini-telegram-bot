@@ -25,6 +25,7 @@ from storage.repositories import (
     SettingsRepository,
     ConversationRepository,
     WatchlistRepository,
+    AlertRepository,
 )
 from trading.binance_client import BinanceClient
 from config.prompts import (
@@ -48,6 +49,7 @@ async def dispatch_telegram_update(
     conversation_repo: Optional[ConversationRepository] = None,
     watchlist_repo: Optional[WatchlistRepository] = None,
     binance_client: Optional[BinanceClient] = None,
+    alert_repo: Optional[AlertRepository] = None,
 ) -> None:
     """
     Main dispatching pipeline for Telegram webhook updates.
@@ -102,6 +104,7 @@ async def dispatch_telegram_update(
                 conversation_repo=conversation_repo,
                 watchlist_repo=watchlist_repo,
                 binance_client=binance_client,
+                alert_repo=alert_repo,
             )
             if handled:
                 return
