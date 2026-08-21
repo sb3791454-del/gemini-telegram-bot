@@ -7,6 +7,7 @@ from storage.repositories import (
     SettingsRepository,
     ConversationRepository,
     WatchlistRepository,
+    AlertRepository,
     infer_memory_type,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "SettingsRepository",
     "ConversationRepository",
     "WatchlistRepository",
+    "AlertRepository",
     "infer_memory_type",
 ]

@@ -1,3 +1,4 @@
+from alerts.models import AlertDefinition
 """Repository abstractions for User Profile, Memory, Settings, and Conversation History."""
 
 import json
@@ -119,137 +120,148 @@ class MemoryRepository:
         """
         return await self.db.fetch_one(sql, telegram_user_id, content)
 
-    async def add_memory(self, telegram_user_id: int, memory_type: str, content: str) -> Dict[str, Any]:
+    async def add_memory(
+        self,
+        telegram_user_id: int,
+        content: str,
+        memory_type: Optional[str] = None
+    ) -> Optional[int]:
         """
-        Stores a new discrete memory item after validating limits and duplicates.
-        Returns result dict with status and metadata.
+        Adds a new memory item for the user.
+        Rejects empty or duplicate content and enforces user-level limit.
+        Returns the inserted memory ID on success, or None on failure.
         """
-        cleaned_content = content.strip()
-        if not cleaned_content:
-            return {"success": False, "reason": "empty_content"}
+        if not self.db.is_available:
+            return None
 
-        # 1. Enforce memory capacity limit (100 max per user)
+        cleaned = content.strip()
+        if not cleaned:
+            return None
+
         current_count = await self.count_memories(telegram_user_id)
         if current_count >= MAX_MEMORIES_PER_USER:
-            return {"success": False, "reason": "limit_reached", "limit": MAX_MEMORIES_PER_USER}
+            logger.warning(f"User {telegram_user_id} reached maximum memory limit ({MAX_MEMORIES_PER_USER}).")
+            return None
 
-        # 2. Check for exact duplicate content
-        existing_dup = await self.find_duplicate_memory(telegram_user_id, cleaned_content)
-        if existing_dup:
-            return {"success": False, "reason": "duplicate", "existing": existing_dup}
+        duplicate = await self.find_duplicate_memory(telegram_user_id, cleaned)
+        if duplicate:
+            return duplicate["id"]
 
+        inferred_type = memory_type if memory_type else infer_memory_type(cleaned)
         now = _get_utc_now_iso()
+
         sql = """
         INSERT INTO conversation_memories (telegram_user_id, memory_type, content, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?)
         """
-        executed = await self.db.execute(sql, telegram_user_id, memory_type, cleaned_content, now, now)
-        if executed:
-            return {"success": True, "memory_type": memory_type, "content": cleaned_content}
-        return {"success": False, "reason": "db_error"}
+        success = await self.db.execute(sql, telegram_user_id, inferred_type, cleaned, now, now)
+        if success:
+            fetch_sql = "SELECT id FROM conversation_memories WHERE telegram_user_id = ? AND content = ? ORDER BY id DESC LIMIT 1"
+            row = await self.db.fetch_one(fetch_sql, telegram_user_id, cleaned)
+            if row and "id" in row:
+                return int(row["id"])
+            return 1
+        return None
 
     async def delete_memory(self, telegram_user_id: int, memory_id: int) -> bool:
-        """Deletes a single memory item strictly scoped by user ID."""
+        """Deletes a specific memory item belonging to the specified user."""
+        if not self.db.is_available:
+            return False
+
+        existing = await self.get_memory_by_id(telegram_user_id, memory_id)
+        if not existing:
+            return False
+
         sql = "DELETE FROM conversation_memories WHERE id = ? AND telegram_user_id = ?"
         return await self.db.execute(sql, memory_id, telegram_user_id)
 
     async def delete_all_memories(self, telegram_user_id: int) -> bool:
-        """Deletes all memories belonging strictly to the specified Telegram user."""
+        """Deletes all memory items for the user."""
+        if not self.db.is_available:
+            return False
         sql = "DELETE FROM conversation_memories WHERE telegram_user_id = ?"
         return await self.db.execute(sql, telegram_user_id)
 
-    async def get_memory_count(self, telegram_user_id: int) -> int:
-        """Alias for count_memories."""
-        return await self.count_memories(telegram_user_id)
-
-    async def clear_all_memories(self, telegram_user_id: int) -> bool:
-        """Alias for delete_all_memories."""
-        return await self.delete_all_memories(telegram_user_id)
-
 class SettingsRepository:
-    """Manages user-specific assistant settings."""
+    """Manages persistent key-value configuration and session tracking in D1."""
     def __init__(self, db: D1Database):
         self.db = db
 
     async def get_settings(self, telegram_user_id: int) -> Dict[str, Any]:
-        """Retrieves user settings dict."""
+        """Fetches all settings for the user as a Python dictionary."""
+        if not self.db.is_available:
+            return {}
         sql = "SELECT settings_json FROM assistant_settings WHERE telegram_user_id = ?"
         row = await self.db.fetch_one(sql, telegram_user_id)
         if row and "settings_json" in row:
             try:
                 return json.loads(row["settings_json"])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to parse settings JSON for user {telegram_user_id}: {e}")
+                return {}
         return {}
 
-    async def update_settings(self, telegram_user_id: int, settings: Dict[str, Any]) -> bool:
-        """Upserts user settings."""
+    async def get_setting(self, telegram_user_id: int, key: str, default: Any = None) -> Any:
+        """Retrieves a specific setting value for the user."""
+        settings = await self.get_settings(telegram_user_id)
+        return settings.get(key, default)
+
+    async def set_setting(self, telegram_user_id: int, key: str, value: Any) -> bool:
+        """Sets or updates a specific setting key-value pair for the user."""
+        if not self.db.is_available:
+            return False
+
+        current = await self.get_settings(telegram_user_id)
+        current[key] = value
         now = _get_utc_now_iso()
-        settings_str = json.dumps(settings)
+        settings_str = json.dumps(current)
+
         sql = """
         INSERT INTO assistant_settings (telegram_user_id, settings_json, updated_at)
         VALUES (?, ?, ?)
-        ON CONFLICT(telegram_user_id) DO UPDATE SET settings_json = ?, updated_at = ?
+        ON CONFLICT(telegram_user_id) DO UPDATE SET
+            settings_json = excluded.settings_json,
+            updated_at = excluded.updated_at
         """
-        return await self.db.execute(sql, telegram_user_id, settings_str, now, settings_str, now)
+        return await self.db.execute(sql, telegram_user_id, settings_str, now)
 
 class ConversationRepository:
-    """Manages active conversation sessions and recent message history in D1."""
+    """Manages conversation sessions and recent turn history in D1."""
     def __init__(self, db: D1Database, settings_repo: Optional[SettingsRepository] = None):
         self.db = db
-        self.settings_repo = settings_repo or SettingsRepository(db)
+        self.settings_repo = settings_repo
 
-    async def get_or_create_active_session(self, telegram_user_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Retrieves the user's active session, or creates a new one if none exists.
-        Verifies session ownership strictly.
-        """
+    async def get_or_create_active_session(self, telegram_user_id: int) -> Optional[int]:
+        """Retrieves the current active session ID or creates a new one."""
         if not self.db.is_available:
             return None
 
-        # 1. Check assistant_settings for active_session_id
-        settings = await self.settings_repo.get_settings(telegram_user_id)
-        active_session_id = settings.get("active_session_id")
-        
-        if active_session_id is not None:
-            sql = "SELECT id, telegram_user_id, created_at, updated_at FROM conversation_sessions WHERE id = ? AND telegram_user_id = ?"
-            session = await self.db.fetch_one(sql, active_session_id, telegram_user_id)
-            if session:
-                return session
+        if self.settings_repo:
+            active_id = await self.settings_repo.get_setting(telegram_user_id, "active_session_id")
+            if active_id:
+                sql_check = "SELECT id FROM conversation_sessions WHERE id = ? AND telegram_user_id = ?"
+                existing = await self.db.fetch_one(sql_check, active_id, telegram_user_id)
+                if existing:
+                    return int(active_id)
 
-        # 2. Check the most recent session in conversation_sessions
-        sql_recent = "SELECT id, telegram_user_id, created_at, updated_at FROM conversation_sessions WHERE telegram_user_id = ? ORDER BY id DESC LIMIT 1"
-        recent_session = await self.db.fetch_one(sql_recent, telegram_user_id)
-        if recent_session:
-            settings["active_session_id"] = recent_session["id"]
-            await self.settings_repo.update_settings(telegram_user_id, settings)
-            return recent_session
-
-        # 3. Create a fresh session if none exists
         return await self.create_new_session(telegram_user_id)
 
-    async def create_new_session(self, telegram_user_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Creates a fresh conversation session for the user and points active_session_id to it.
-        Preserves existing user settings.
-        """
+    async def create_new_session(self, telegram_user_id: int) -> Optional[int]:
+        """Creates a brand new conversation session for the user."""
         if not self.db.is_available:
             return None
 
         now = _get_utc_now_iso()
         sql = "INSERT INTO conversation_sessions (telegram_user_id, created_at, updated_at) VALUES (?, ?, ?)"
         success = await self.db.execute(sql, telegram_user_id, now, now)
-        if not success:
-            return None
-
-        sql_fetch = "SELECT id, telegram_user_id, created_at, updated_at FROM conversation_sessions WHERE telegram_user_id = ? ORDER BY id DESC LIMIT 1"
-        new_session = await self.db.fetch_one(sql_fetch, telegram_user_id)
-        if new_session:
-            settings = await self.settings_repo.get_settings(telegram_user_id)
-            settings["active_session_id"] = new_session["id"]
-            await self.settings_repo.update_settings(telegram_user_id, settings)
-            return new_session
-
+        if success:
+            fetch_sql = "SELECT id FROM conversation_sessions WHERE telegram_user_id = ? ORDER BY id DESC LIMIT 1"
+            row = await self.db.fetch_one(fetch_sql, telegram_user_id)
+            if row and "id" in row:
+                session_id = int(row["id"])
+                if self.settings_repo:
+                    await self.settings_repo.set_setting(telegram_user_id, "active_session_id", session_id)
+                return session_id
         return None
 
     async def get_recent_messages(
@@ -258,24 +270,19 @@ class ConversationRepository:
         session_id: int,
         limit: int = CONVERSATION_HISTORY_LIMIT
     ) -> List[Dict[str, Any]]:
-        """
-        Retrieves recent messages from the session ordered chronologically (oldest to newest).
-        Enforces strict user isolation.
-        """
+        """Retrieves the most recent messages for a session in chronological order."""
         if not self.db.is_available:
             return []
 
         sql = """
-        SELECT id, session_id, telegram_user_id, role, content, created_at
+        SELECT role, content, created_at
         FROM conversation_messages
         WHERE session_id = ? AND telegram_user_id = ?
         ORDER BY id DESC
         LIMIT ?
         """
         rows = await self.db.fetch_all(sql, session_id, telegram_user_id, limit)
-        if rows:
-            return list(reversed(rows))
-        return []
+        return list(reversed(rows))
 
     async def add_message(
         self,
@@ -379,4 +386,219 @@ class WatchlistRepository:
         row = await self.db.fetch_one(query, user_id)
         if row:
             return int(row.get("count", 0))
+        return 0
+
+
+class AlertRepository:
+    """Manages persistent user alerts and trigger audit logs in Cloudflare D1."""
+
+    def __init__(self, db: D1Database):
+        self.db = db
+
+    def _row_to_alert_def(self, row: Dict[str, Any]) -> AlertDefinition:
+        """Helper to convert D1 row dict to AlertDefinition dataclass."""
+        return AlertDefinition(
+            id=int(row.get("id", 0)),
+            telegram_user_id=int(row.get("telegram_user_id", 0)),
+            symbol=str(row.get("symbol", "")),
+            alert_type=str(row.get("alert_type", "")),
+            timeframe=str(row.get("timeframe", "1h")),
+            target_value=float(row["target_value"]) if row.get("target_value") is not None else None,
+            direction=str(row["direction"]) if row.get("direction") is not None else None,
+            status=str(row.get("status", "ARMED")),
+            cooldown_minutes=int(row.get("cooldown_minutes", 60)),
+            is_recurring=int(row.get("is_recurring", 0)),
+            user_capital=float(row["user_capital"]) if row.get("user_capital") is not None else None,
+            user_risk_pct=float(row["user_risk_pct"]) if row.get("user_risk_pct") is not None else None,
+            last_evaluated_at=row.get("last_evaluated_at"),
+            last_triggered_at=row.get("last_triggered_at"),
+            last_state_payload=row.get("last_state_payload"),
+            notes=row.get("notes"),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+        )
+
+    async def create_alert(
+        self,
+        user_id: int,
+        symbol: str,
+        alert_type: str,
+        target_value: Optional[float] = None,
+        direction: Optional[str] = None,
+        timeframe: str = "1h",
+        cooldown_minutes: int = 60,
+        is_recurring: int = 0,
+        user_capital: Optional[float] = None,
+        user_risk_pct: Optional[float] = None,
+        notes: Optional[str] = None,
+    ) -> Optional[int]:
+        """Creates a new persistent alert in D1 and returns its auto-incremented ID."""
+        if not self.db.is_available or not user_id:
+            return None
+
+        clean_sym = symbol.strip().upper()
+        now_iso = _get_utc_now_iso()
+        sql = """
+        INSERT INTO user_alerts (
+            telegram_user_id, symbol, alert_type, timeframe, target_value, direction,
+            status, cooldown_minutes, is_recurring, user_capital, user_risk_pct,
+            notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ARMED', ?, ?, ?, ?, ?, ?, ?)
+        """
+        success = await self.db.execute(
+            sql,
+            user_id,
+            clean_sym,
+            alert_type.upper(),
+            timeframe.lower(),
+            target_value,
+            direction.upper() if direction else None,
+            cooldown_minutes,
+            is_recurring,
+            user_capital,
+            user_risk_pct,
+            notes or "",
+            now_iso,
+            now_iso
+        )
+        if success:
+            fetch_sql = "SELECT id FROM user_alerts WHERE telegram_user_id = ? AND symbol = ? AND created_at = ? ORDER BY id DESC LIMIT 1"
+            row = await self.db.fetch_one(fetch_sql, user_id, clean_sym, now_iso)
+            if row and "id" in row:
+                return int(row["id"])
+            return 1
+        return None
+
+    async def get_alert_by_id(self, alert_id: int, user_id: Optional[int] = None) -> Optional[AlertDefinition]:
+        """Fetches a specific alert by ID, optionally validating owner user ID."""
+        if not self.db.is_available or not alert_id:
+            return None
+
+        if user_id is not None:
+            sql = "SELECT * FROM user_alerts WHERE id = ? AND telegram_user_id = ?"
+            row = await self.db.fetch_one(sql, alert_id, user_id)
+        else:
+            sql = "SELECT * FROM user_alerts WHERE id = ?"
+            row = await self.db.fetch_one(sql, alert_id)
+
+        if row:
+            return self._row_to_alert_def(row)
+        return None
+
+    async def get_user_alerts(self, user_id: int, limit: int = 20) -> List[AlertDefinition]:
+        """Retrieves all alert rules configured by a specific user."""
+        if not self.db.is_available or not user_id:
+            return []
+
+        sql = "SELECT * FROM user_alerts WHERE telegram_user_id = ? ORDER BY id DESC LIMIT ?"
+        rows = await self.db.fetch_all(sql, user_id, limit)
+        return [self._row_to_alert_def(r) for r in rows]
+
+    async def get_all_active_alerts(self, limit: int = 100) -> List[AlertDefinition]:
+        """Retrieves all ARMED and COOLDOWN alerts across all users for scheduled tick evaluation."""
+        if not self.db.is_available:
+            return []
+
+        sql = "SELECT * FROM user_alerts WHERE status IN ('ARMED', 'COOLDOWN') ORDER BY id ASC LIMIT ?"
+        rows = await self.db.fetch_all(sql, limit)
+        return [self._row_to_alert_def(r) for r in rows]
+
+    async def update_alert_status(
+        self,
+        alert_id: int,
+        status: str,
+        last_triggered_at: Optional[str] = None,
+        last_state_payload: Optional[str] = None
+    ) -> bool:
+        """Updates alert status, trigger timestamp, and market state payload."""
+        if not self.db.is_available or not alert_id:
+            return False
+
+        now_iso = _get_utc_now_iso()
+        if last_triggered_at:
+            sql = """
+            UPDATE user_alerts
+            SET status = ?, last_evaluated_at = ?, last_triggered_at = ?, last_state_payload = ?, updated_at = ?
+            WHERE id = ?
+            """
+            return await self.db.execute(sql, status, now_iso, last_triggered_at, last_state_payload, now_iso, alert_id)
+        else:
+            sql = """
+            UPDATE user_alerts
+            SET status = ?, last_evaluated_at = ?, last_state_payload = COALESCE(?, last_state_payload), updated_at = ?
+            WHERE id = ?
+            """
+            return await self.db.execute(sql, status, now_iso, last_state_payload, now_iso, alert_id)
+
+    async def pause_alert(self, alert_id: int, user_id: int) -> bool:
+        """Pauses monitoring for a user's alert."""
+        if not self.db.is_available or not user_id or not alert_id:
+            return False
+
+        now_iso = _get_utc_now_iso()
+        sql = "UPDATE user_alerts SET status = 'PAUSED', updated_at = ? WHERE id = ? AND telegram_user_id = ?"
+        return await self.db.execute(sql, now_iso, alert_id, user_id)
+
+    async def resume_alert(self, alert_id: int, user_id: int) -> bool:
+        """Resumes monitoring for a paused alert."""
+        if not self.db.is_available or not user_id or not alert_id:
+            return False
+
+        now_iso = _get_utc_now_iso()
+        sql = "UPDATE user_alerts SET status = 'ARMED', updated_at = ? WHERE id = ? AND telegram_user_id = ?"
+        return await self.db.execute(sql, now_iso, alert_id, user_id)
+
+    async def delete_alert(self, alert_id: int, user_id: int) -> bool:
+        """Deletes an alert rule owned by the user."""
+        if not self.db.is_available or not user_id or not alert_id:
+            return False
+
+        sql = "DELETE FROM user_alerts WHERE id = ? AND telegram_user_id = ?"
+        return await self.db.execute(sql, alert_id, user_id)
+
+    async def record_trigger_history(
+        self,
+        alert_id: int,
+        telegram_user_id: int,
+        symbol: str,
+        trigger_price: float,
+        trigger_reason: str,
+        setup_state: Optional[str] = None,
+        hard_sl_price: Optional[float] = None,
+        tp1_price: Optional[float] = None,
+        notification_status: str = "DELIVERED"
+    ) -> bool:
+        """Records an immutable push notification attempt in the trigger history."""
+        if not self.db.is_available:
+            return False
+
+        now_iso = _get_utc_now_iso()
+        sql = """
+        INSERT INTO alert_trigger_history (
+            alert_id, telegram_user_id, symbol, trigger_price, trigger_reason,
+            setup_state, hard_sl_price, tp1_price, notification_status, delivered_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        return await self.db.execute(
+            sql,
+            alert_id,
+            telegram_user_id,
+            symbol,
+            trigger_price,
+            trigger_reason,
+            setup_state,
+            hard_sl_price,
+            tp1_price,
+            notification_status,
+            now_iso
+        )
+
+    async def get_alert_count(self, user_id: int) -> int:
+        """Returns total active and configured alerts for a user."""
+        if not self.db.is_available or not user_id:
+            return 0
+        sql = "SELECT COUNT(*) as count FROM user_alerts WHERE telegram_user_id = ? AND status != 'DISABLED'"
+        row = await self.db.fetch_one(sql, user_id)
+        if row and "count" in row:
+            return int(row["count"])
         return 0
